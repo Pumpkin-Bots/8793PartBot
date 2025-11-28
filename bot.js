@@ -70,7 +70,8 @@ const commands = [
           { name: 'Electrical',  value: 'Electrical' },
           { name: 'Vision',      value: 'Vision' },
 		  { name: 'Pneumatics',  value: 'Pneumatics' },
-          { name: 'Software',    value: 'Safety' },
+          { name: 'Software',    value: 'Software' },
+		  { name: 'Safety',      value: 'Safety' },
           { name: 'Spares',      value: 'Spares' },
           { name: 'Other',       value: 'Other' }
         )
