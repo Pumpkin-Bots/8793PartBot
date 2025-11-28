@@ -4,6 +4,10 @@ npm-debug.log
 yarn.lock
 pnpm-lock.yaml
 
+# Apps Script / clasp
+apps-script/.clasprc.json
+.clasprc.json
+
 # Environment / secrets
 .env
 .env.local
