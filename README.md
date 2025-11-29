@@ -196,7 +196,7 @@ SKU | Vendor | Part Name | Location | Qty
 
 ---
 
-## Deployment Options
+## Cloud Hosted Deployment Options
 Recommended:
 - **Railway**
 - **Render**
@@ -213,15 +213,16 @@ Others:
 - Automatic cart building  
 - SKU disambiguation improvements  
 - Inventory QR scanning  
-- Budget dashboards  
-- Multi-team federation system  
+- Budget dashboards
 - Web dashboard for mentors  
+- Predictive part ordering modeling
 
 ---
 
 ## Maintainers
 **FRC Team 8793 – Pumpkin Bots**  
 Engineering Lead: Franz Dill  
+Student Lead: TBD
 AI Assistant: ChatGPT
 
 ---
