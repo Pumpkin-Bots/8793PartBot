@@ -252,7 +252,7 @@ This helps build community knowledge and allows the team to track adoption and c
 
 Notification can be done in any of the following ways:
 - Opening an Issue in this GitHub repository  
-- Sending an email to the team  
+- Sending an email to the team (pumpkinbots@hmbrobotics.org)
 - Sharing usage publicly in your own README or documentation  
 
 This requirement does **not** restrict your rights granted under the MIT License; it is intended solely to encourage collaboration and transparency among teams.
