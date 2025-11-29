@@ -2,10 +2,22 @@
  * CONFIG
  ******************************************************/
 
+/* 11-29 TEST COMMNENT */
+
 // Sheet (tab) names
 const PART_REQUESTS_SHEET_NAME = 'Part Requests';
 const ORDERS_SHEET_NAME        = 'Orders';
 const INVENTORY_SHEET_NAME     = 'Inventory';
+
+/***********************
+ * 8793PartBot – BOM Import Config
+ ***********************/
+const BOM_IMPORT_CONFIG = {
+  BOM_SHEET_NAME: 'Onshape_BOM',        // Sheet with imported Onshape BOM CSV
+  REQUESTS_SHEET_NAME: 'Requests',      // Main ordering / requests sheet
+  OPENAI_MODEL: 'gpt-4o-mini',          // Model for enrichment
+  OPENAI_PROPERTY_KEY: 'OPENAI_API_KEY' // Script property name for the API key
+};
 
 // Script property holding your OpenAI API key
 const OPENAI_KEY_PROPERTY_NAME = 'OPENAI_API_KEY';
@@ -320,6 +332,67 @@ function enrichSelectedFromMenu() {
   const notes = sheet.getRange(row, 18).getValue() || '';
   enrichPartRequest(row, notes);
   SpreadsheetApp.getUi().alert('AI enrichment attempted for row ' + row + '.');
+}
+
+function aiEnrichPart(description, partNumber) {
+  const apiKey = PropertiesService.getScriptProperties().getProperty('OPENAI_API_KEY');
+  if (!apiKey) throw new Error("Missing OPENAI_API_KEY in Script Properties.");
+
+  const prompt = `
+  You are an FRC-focused parts identification AI. 
+  Given a part from an Onshape BOM, identify the most likely FRC vendor,
+  SKU, price estimate, and URL.
+
+  Priorities:
+  1. REV Robotics
+  2. WestCoast Products (WCP)
+  3. AndyMark
+  4. McMaster-Carr
+  5. Amazon ONLY if no other option exists.
+
+  Provide JSON ONLY with:
+  {
+    "sku": "...",
+    "vendor": "...",
+    "url": "...",
+    "est_price": "...",
+    "stock_status": "...",
+    "alt_vendors": ["...", "..."],
+    "normalized_description": "..."
+  }
+
+  Part number: ${partNumber}
+  Description: ${description}
+  `;
+
+  const payload = {
+    model: "gpt-4o-mini",
+    messages: [{ role: "user", content: prompt }],
+    temperature: 0.1
+  };
+
+  const response = UrlFetchApp.fetch("https://api.openai.com/v1/chat/completions", {
+    method: "post",
+    contentType: "application/json",
+    payload: JSON.stringify(payload),
+    headers: { Authorization: "Bearer " + apiKey }
+  });
+
+  const json = JSON.parse(response.getContentText());
+
+  try {
+    return JSON.parse(json.choices[0].message.content);
+  } catch (err) {
+    return {
+      sku: "",
+      vendor: "",
+      url: "",
+      est_price: "",
+      stock_status: "",
+      alt_vendors: [],
+      normalized_description: description
+    };
+  }
 }
 
 function getPartInfoFromAI(url, htmlSnippet, hintText) {
@@ -850,6 +923,8 @@ function extractVendorFromURL(url) {
   if (lower.includes('amazon'))           return 'Amazon';
   if (lower.includes('wcproducts'))       return 'West Coast Products';
   if (lower.includes('ctr-electronics'))  return 'CTR Electronics';
+  if (lower.includes('reduxrobotics'))    return 'ReduxRobotics';
+  if (lower.includes('thethirftybot'))    return 'ThriftyBot';
   if (lower.includes('homedepot'))        return 'Home Depot';
   if (lower.includes('powerwerx'))        return 'PowerWorx';
   if (lower.includes('sendcutsend'))      return 'SendCutSend';
