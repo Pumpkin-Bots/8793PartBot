@@ -36,6 +36,24 @@ const PART_REQUESTS_SHEET_NAME = 'Part Requests';
 const ORDERS_SHEET_NAME        = 'Orders';
 const INVENTORY_SHEET_NAME     = 'Inventory';
 
+/******************************************************
+ * NORMALIZATION & HEADER HELPERS
+ ******************************************************/
+function normalizeSku(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase();
+}
+
+function findColumnIndex_(header, matchFn) {
+  for (let i = 0; i < header.length; i++) {
+    const raw = header[i] || '';
+    const norm = raw.toString().trim().toLowerCase();
+    if (matchFn(norm)) return i;
+  }
+  return -1;
+}
+
 /***********************
  * 8793PartBot – BOM Import Config
  ***********************/
@@ -337,9 +355,26 @@ function enrichPartRequest(row, hintText) {
   if (price)      sheet.getRange(row, 13).setValue(price);
   if (stockState) sheet.getRange(row, 12).setValue(stockState);
 
-  if (sku && inventorySheet) {
-    const invOnHand = lookupInventoryBySKU(inventorySheet, sku);
+  if (inventorySheet && sku) {
+    const rec = getInventoryRecordBySku_(inventorySheet, sku);
+    const invOnHand = rec ? rec.quantity : 0;
+
+    Logger.log(
+      'enrichPartRequest row %s: SKU="%s", invOnHand=%s, location="%s"',
+      row,
+      sku,
+      invOnHand,
+      rec ? rec.location : ''
+    );
+
     sheet.getRange(row, 11).setValue(invOnHand);
+  } else {
+    Logger.log(
+      'enrichPartRequest row %s: inventory lookup skipped (inventorySheet=%s, sku="%s")',
+      row,
+      !!inventorySheet,
+      sku
+    );
   }
 }
 
@@ -653,23 +688,110 @@ function handleOrderStatus_(body) {
 }
 
 /******************************************************
- * INVENTORY LOOKUP
+ * INVENTORY LOOKUP – FULL RECORD BY SKU (AGGREGATES MULTIPLE ROWS)
  ******************************************************/
-function lookupInventoryBySKU(inventorySheet, sku) {
+function getInventoryRecordBySku_(inventorySheet, sku) {
+  if (!sku) {
+    Logger.log('getInventoryRecordBySku_: no SKU provided');
+    return null;
+  }
+
   const values = inventorySheet.getDataRange().getValues();
-  const SKU_COL = 0; // A
-  const QTY_COL = 4; // E
+  if (!values || values.length < 2) {
+    Logger.log('getInventoryRecordBySku_: inventory empty');
+    return null;
+  }
 
-  const target = sku.toString().trim().toLowerCase();
+  const header = values[0];
+  const rows   = values.slice(1);
 
-  for (let i = 1; i < values.length; i++) {
-    const rowSku = (values[i][SKU_COL] || '').toString().trim().toLowerCase();
-    if (rowSku && rowSku === target) {
-      const qty = values[i][QTY_COL];
-      return qty || 0;
+  // Adapt to your actual headers:
+  // A: "Part Number / SKU"
+  // B: "Vendor"
+  // C: "Part Name"
+  // D: "Location"
+  // E: "Qty On-Hand"
+  const skuCol = findColumnIndex_(header, h =>
+    h.includes('sku') || h.includes('part number')
+  );
+  const qtyCol = findColumnIndex_(header, h =>
+    h.includes('qty') || h.includes('on-hand')
+  );
+  const vendorCol = findColumnIndex_(header, h => h.includes('vendor'));
+  const nameCol   = findColumnIndex_(header, h => h.includes('part name'));
+  const locCol    = findColumnIndex_(header, h => h.includes('location'));
+
+  Logger.log('Inventory header: ' + JSON.stringify(header));
+  Logger.log('skuCol=%s qtyCol=%s vendorCol=%s nameCol=%s locCol=%s',
+             skuCol, qtyCol, vendorCol, nameCol, locCol);
+
+  if (skuCol === -1 || qtyCol === -1) {
+    Logger.log('getInventoryRecordBySku_: could not find SKU or Qty column');
+    return null;
+  }
+
+  const target = normalizeSku(sku);
+  Logger.log('getInventoryRecordBySku_: search target="%s"', target);
+
+  let firstMatch = null;
+  let totalQty = 0;
+  const locations = [];
+  const rowIndexes = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const rowSkuRaw  = row[skuCol];
+    const rowSkuNorm = normalizeSku(rowSkuRaw);
+
+    if (!rowSkuNorm || rowSkuNorm !== target) {
+      continue;
+    }
+
+    const qty = Number(row[qtyCol]) || 0;
+    totalQty += qty;
+    rowIndexes.push(i + 2); // 1-based + header row
+
+    if (locCol !== -1) {
+      const loc = (row[locCol] || '').toString().trim();
+      if (loc && !locations.includes(loc)) {
+        locations.push(loc);
+      }
+    }
+
+    if (!firstMatch) {
+      firstMatch = {
+        sku:      row[skuCol],
+        quantity: 0, // we’ll fill in after the loop
+        vendor:   vendorCol !== -1 ? row[vendorCol] : '',
+        name:     nameCol   !== -1 ? row[nameCol]   : '',
+        location: locCol    !== -1 ? row[locCol]    : '',
+        rowIndex: i + 2
+      };
     }
   }
-  return 0;
+
+  if (!firstMatch) {
+    Logger.log('getInventoryRecordBySku_: no match for "%s"', sku);
+    return null;
+  }
+
+  // Aggregate quantity and locations
+  firstMatch.quantity = totalQty;
+  if (locations.length > 0) {
+    firstMatch.location = locations.join(' | ');
+  }
+  firstMatch.rowIndexes = rowIndexes;
+
+  Logger.log('getInventoryRecordBySku_: aggregated record: ' + JSON.stringify(firstMatch));
+  return firstMatch;
+}
+
+/******************************************************
+ * COMPAT WRAPPER – quantity only
+ ******************************************************/
+function lookupInventoryBySKU(inventorySheet, sku) {
+  const rec = getInventoryRecordBySku_(inventorySheet, sku);
+  return rec ? rec.quantity : 0;
 }
 
 /******************************************************
@@ -692,41 +814,38 @@ function handleInventoryLookup_(body) {
     return jsonResponse_({ status: 'ok', matches: [] });
   }
 
-  const SKU_COL    = 0;
-  const VENDOR_COL = 1;
-  const NAME_COL   = 2;
-  const LOC_COL    = 3;
-  const QTY_COL    = 4;
+  const header = values[0];
+  const rows   = values.slice(1);
 
-  const rows = values.slice(1);
+  const SKU_COL    = findColumnIndex_(header, h => h.includes('sku') || h.includes('part number'));
+  const VENDOR_COL = findColumnIndex_(header, h => h.includes('vendor'));
+  const NAME_COL   = findColumnIndex_(header, h => h.includes('part name'));
+  const LOC_COL    = findColumnIndex_(header, h => h.includes('location'));
+  const QTY_COL    = findColumnIndex_(header, h => h.includes('qty') || h.includes('on-hand'));
+
+  Logger.log('handleInventoryLookup_ header=' + JSON.stringify(header));
+  Logger.log('Columns: SKU=%s Vendor=%s Name=%s Loc=%s Qty=%s',
+             SKU_COL, VENDOR_COL, NAME_COL, LOC_COL, QTY_COL);
+
   const matches = [];
 
-  // Exact SKU match
+  // Exact SKU match using shared logic
   if (skuQuery) {
-    const target = skuQuery.toLowerCase();
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      const rowSkuRaw = row[SKU_COL];
-      const rowSku = (rowSkuRaw || '').toString().trim().toLowerCase();
-
-      Logger.log('Row %s SKU raw="%s" normalized="%s"', i + 2, rowSkuRaw, rowSku);
-
-      if (rowSku && rowSku === target) {
-        matches.push({
-          sku: row[SKU_COL],
-          vendor: row[VENDOR_COL],
-          name: row[NAME_COL],
-          location: row[LOC_COL],
-          quantity: row[QTY_COL]
-        });
-        break;
-      }
+    const rec = getInventoryRecordBySku_(inventorySheet, skuQuery);
+    if (rec) {
+      matches.push({
+        sku: rec.sku,
+        vendor: rec.vendor,
+        name: rec.name,
+        location: rec.location,
+        quantity: rec.quantity
+      });
     }
   }
 
   // Fallback fuzzy search
   const fallbackQuery = (searchText || skuQuery).toLowerCase();
-  if (matches.length === 0 && fallbackQuery) {
+  if (matches.length === 0 && fallbackQuery && SKU_COL !== -1 && NAME_COL !== -1 && QTY_COL !== -1) {
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       const rowSku  = (row[SKU_COL]  || '').toString().toLowerCase();
@@ -735,9 +854,9 @@ function handleInventoryLookup_(body) {
       if (rowSku.indexOf(fallbackQuery) !== -1 || rowName.indexOf(fallbackQuery) !== -1) {
         matches.push({
           sku: row[SKU_COL],
-          vendor: row[VENDOR_COL],
+          vendor: VENDOR_COL !== -1 ? row[VENDOR_COL] : '',
           name: row[NAME_COL],
-          location: row[LOC_COL],
+          location: LOC_COL !== -1 ? row[LOC_COL] : '',
           quantity: row[QTY_COL]
         });
       }
@@ -747,8 +866,7 @@ function handleInventoryLookup_(body) {
   }
 
   Logger.log('handleInventoryLookup_ result: ' + JSON.stringify(matches));
-
-  return jsonResponse_({ status: 'ok', matches: matches });
+  return jsonResponse_({ status: 'ok', matches });
 }
 
 /******************************************************
@@ -957,4 +1075,12 @@ function extractVendorFromURL(url) {
   if (lower.includes('sendcutsend'))      return 'SendCutSend';
   if (lower.includes('foamorder'))        return 'Foam Order';
   return 'Other Vendor';
+}
+
+// test function
+function testSkuLookup_am3583() {
+  const ss = SpreadsheetApp.getActive();
+  const inventorySheet = ss.getSheetByName(INVENTORY_SHEET_NAME);
+  const rec = getInventoryRecordBySku_(inventorySheet, 'am-3583');
+  Logger.log('testSkuLookup_am3583 => ' + JSON.stringify(rec));
 }
