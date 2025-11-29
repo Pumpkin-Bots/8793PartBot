@@ -89,6 +89,7 @@ OpenAI API (SKU/price parsing)
 │   ├── appsscript.json
 │   ├── clasp.json
 │
+├── LICENSE
 └── README.md   ← this file
 ```
 
