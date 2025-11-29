@@ -227,5 +227,35 @@ AI Assistant: ChatGPT
 
 ---
 
-## License
-Pending team choice (MIT, Apache 2.0, etc.)
+## 📜 License
+
+**8793PartBot – Automated Parts Management System**  
+Copyright (c) 2024  
+**FRC Team 8793 – Pumpkin Bots**
+
+This project is licensed under the **MIT License with a Use Notification Requirement**.
+
+You are free to:
+- Use the software
+- Copy it
+- Modify it
+- Merge it into your own projects
+- Distribute it
+- Use it privately or publicly
+- Use it in competitions, including FIRST Robotics Competition (FRC)
+
+…as long as you follow the MIT terms **and** include the required license notice in any redistributed code.
+
+### 🔔 Use Notification Requirement
+If you use, copy, modify, or distribute this software, you must make a reasonable effort to **notify FRC Team 8793 – Pumpkin Bots**.  
+This helps build community knowledge and allows the team to track adoption and collaborate with other FRC programs.
+
+Notification can be done in any of the following ways:
+- Opening an Issue in this GitHub repository  
+- Sending an email to the team  
+- Sharing usage publicly in your own README or documentation  
+
+This requirement does **not** restrict your rights granted under the MIT License; it is intended solely to encourage collaboration and transparency among teams.
+
+### 📄 Full License Text
+See the [`LICENSE`](./LICENSE) file in this repository for the complete legal terms.
