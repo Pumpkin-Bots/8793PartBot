@@ -1,3 +1,32 @@
+/*
+ * 8793PartBot – Automated Parts Management System
+ * Copyright (c) 2025 FRC Team 8793 – Pumpkin Bots
+ *
+ * Licensed under the MIT License with Use Notification Requirement.
+ * Full license text available in the project root LICENSE file.
+ *
+ * Use Notification Requirement:
+ * Any team or individual who uses, copies, modifies, or distributes this
+ * software must make a reasonable effort to notify FRC Team 8793 – Pumpkin
+ * Bots. Notification may be sent via email (pumpkinbots@hmbrobotics.org) 
+ * or by opening an issue or discussion on the project's GitHub repository. 
+ * This requirement is intended to foster collaboration and does not restrict 
+ * the permitted uses granted under this license.
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to use, copy, modify, merge, publish, and distribute the Software without
+ * restriction, subject to the conditions above.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+ * DEALINGS IN THE SOFTWARE.
+ */
+
 /******************************************************
  * CONFIG
  ******************************************************/
