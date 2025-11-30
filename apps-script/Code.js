@@ -829,6 +829,40 @@ function handleInventoryLookup_(body) {
 
   const matches = [];
 
+  /******************************************************
+   * NEW: LOCATION LOOKUP (BIN-xxx, RACK-xxx)
+   ******************************************************/
+  const upperSearch = searchText.toUpperCase();
+  const isLocationLookup =
+    upperSearch.startsWith('BIN-') ||
+    upperSearch.startsWith('RACK-');
+
+  if (isLocationLookup && LOC_COL !== -1 && QTY_COL !== -1 && NAME_COL !== -1) {
+    Logger.log('handleInventoryLookup_: location lookup for "%s"', upperSearch);
+
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
+      const locValRaw = (row[LOC_COL] || '').toString().trim();
+      const locVal    = locValRaw.toUpperCase();
+
+      if (locVal === upperSearch) {
+        matches.push({
+          sku:       SKU_COL    !== -1 ? row[SKU_COL]    : '',
+          vendor:    VENDOR_COL !== -1 ? row[VENDOR_COL] : '',
+          name:      NAME_COL   !== -1 ? row[NAME_COL]   : '',
+          location:  locValRaw,
+          quantity:  QTY_COL    !== -1 ? row[QTY_COL]    : ''
+        });
+      }
+    }
+
+    Logger.log('handleInventoryLookup_ location result: ' + JSON.stringify(matches));
+    return jsonResponse_({ status: 'ok', matches: matches });
+  }
+
+  /******************************************************
+   * EXISTING LOGIC: SKU EXACT LOOKUP
+   ******************************************************/
   // Exact SKU match using shared logic
   if (skuQuery) {
     const rec = getInventoryRecordBySku_(inventorySheet, skuQuery);
@@ -843,7 +877,9 @@ function handleInventoryLookup_(body) {
     }
   }
 
-  // Fallback fuzzy search
+  /******************************************************
+   * EXISTING LOGIC: FUZZY SEARCH FALLBACK
+   ******************************************************/
   const fallbackQuery = (searchText || skuQuery).toLowerCase();
   if (matches.length === 0 && fallbackQuery && SKU_COL !== -1 && NAME_COL !== -1 && QTY_COL !== -1) {
     for (let i = 0; i < rows.length; i++) {
