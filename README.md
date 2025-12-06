@@ -77,12 +77,14 @@ OpenAI API (SKU/price parsing)
 │
 ├── discord-bot/
 │   ├── bot.js
+│   ├── <TODO: Add configuration file>
 │   ├── package.json
 │   ├── package-lock.json
 │   ├── .env.example
 │
 ├── apps-script/
 │   ├── main.gs
+│   ├── <TODO: Add configuration file>
 │   ├── enrichment.gs
 │   ├── inventory.gs
 │   ├── workflow.gs
@@ -103,27 +105,86 @@ git clone https://github.com/<yourname>/8793PartBot.git
 cd 8793PartBot
 ```
 
----
-
-## Discord Bot Setup
-
-### Install dependencies
+## Discord Bot Setup -- Google VM
 ```
-cd discord-bot
-npm install
+sudo apt-get update
+curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+sudo apt-get install -y nodejs git
+```
+
+### Install dependencies and clone repo
+```
+git clone https://github.com/YOUR_USERNAME/YOUR_REPO.git
+cd YOUR_REPO
+npm install discord.js axios
 ```
 
 ### Create `.env`
 ```
-DISCORD_TOKEN=xxxxx
-CLIENT_ID=xxxxx
-GUILD_ID=xxxxx
-APPS_SCRIPT_URL=https://script.google.com/.../exec
+export DISCORD_TOKEN="your-token"
+export CLIENT_ID="your-client-id"
+export GUILD_ID="your-guild-id"
+export APPS_SCRIPT_URL="https://script.google.com/macros/s/AKfycbwQQNTI0ML67hXAR5mNB2bZDkPlw9s4hOAjx-L-7Fj8sBI5nQXHIi4GUAfoTL5iKVmn/exec"
 ```
 
-### Start the bot
+### Run and keep the bot alive
 ```
-node bot.js
+sudo npm install -g pm2
+pm2 start bot.js --name discord-bot
+pm2 startup
+pm2 save
+```
+
+### Run and keep the bot alive
+```
+# Check bot status
+pm2 status
+
+# View bot logs (real-time)
+pm2 logs discord-bot
+```
+
+## Test in Discord
+Now go to your Discord server and try:
+```
+/requestpart subsystem:Drive qty:1 priority:Medium
+```
+You should see:
+```
+✅ Request REQ-xxxx submitted.
+Subsystem: Drive
+Qty: 1, Priority: Medium
+```
+
+Useful Commands for Managing Your Bot
+```
+bash# View status
+pm2 status
+
+# View logs
+pm2 logs discord-bot
+
+# Restart bot
+pm2 restart discord-bot
+
+# Stop bot
+pm2 stop discord-bot
+
+# Start bot (if stopped)
+pm2 start discord-bot
+
+# View detailed info
+pm2 show discord-bot
+
+# Monitor (dashboard view)
+pm2 monit
+```
+When You Update Bot Code from GitHub
+```
+bashcd ~/8793PartBot/discord-bot
+git pull origin main
+pm2 restart discord-bot
+pm2 logs discord-bot
 ```
 
 ---
