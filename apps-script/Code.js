@@ -32,9 +32,11 @@
  ******************************************************/
 
 // Sheet (tab) names
-const PART_REQUESTS_SHEET_NAME = 'Part Requests';
-const ORDERS_SHEET_NAME        = 'Orders';
-const INVENTORY_SHEET_NAME     = 'Inventory';
+const PART_REQUESTS_SHEET_NAME         = 'Part Requests';
+const ORDERS_SHEET_NAME                = 'Orders';
+const INVENTORY_SHEET_NAME             = 'Inventory';
+const DISCORD_PROCUREMENT_WEBHOOK_PROP = 'DISCORD_PROCUREMENT_WEBHOOK_URL';
+const DISCORD_PROCUREMENT_ROLE_PROP    = 'DISCORD_PROCUREMENT_ROLE_ID';
 
 /******************************************************
  * NORMALIZATION & HEADER HELPERS
@@ -208,6 +210,76 @@ function jsonResponse_(obj) {
 }
 
 /******************************************************
+ * DISCORD PROCUREMENT NOTIFICATION (via Webhook)
+ ******************************************************/
+function sendProcurementNotification_(request) {
+  const props = PropertiesService.getScriptProperties();
+  const webhookUrl = props.getProperty(DISCORD_PROCUREMENT_WEBHOOK_PROP);
+  if (!webhookUrl) {
+    Logger.log('sendProcurementNotification_: no DISCORD_PROCUREMENT_WEBHOOK_URL configured; skipping.');
+    return;
+  }
+
+  const roleId  = props.getProperty(DISCORD_PROCUREMENT_ROLE_PROP);
+  const rolePing = roleId ? `<@&${roleId}>` : '';
+
+  const {
+    requestID,
+    timestamp,
+    requester,
+    subsystem,
+    partName,
+    sku,
+    link,
+    quantity,
+    priority,
+    neededBy,
+    maxBudget,
+    notes
+  } = request;
+
+  const content = rolePing
+    ? `${rolePing} New part request submitted: **${requestID || ''}**`
+    : `New part request submitted: **${requestID || ''}**`;
+
+  const embed = {
+    title: 'New Part Request',
+    fields: [
+      { name: 'Requester', value: requester || 'Unknown', inline: true },
+      { name: 'Subsystem', value: subsystem || '—', inline: true },
+      { name: 'Priority', value: priority || 'Medium', inline: true },
+      { name: 'Quantity', value: String(quantity || ''), inline: true },
+      { name: 'Needed By', value: neededBy ? String(neededBy) : '—', inline: true },
+      { name: 'Max Budget', value: maxBudget ? String(maxBudget) : '—', inline: true },
+      { name: 'Part Name', value: partName || '—', inline: false },
+      { name: 'SKU', value: sku || '—', inline: true },
+      { name: 'Link', value: link || '—', inline: false },
+      { name: 'Notes', value: notes || '—', inline: false }
+    ],
+    timestamp: (timestamp instanceof Date ? timestamp : new Date()).toISOString()
+  };
+
+  const payload = {
+    content: content,
+    embeds: [embed]
+  };
+
+  try {
+    const resp = UrlFetchApp.fetch(webhookUrl, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    Logger.log('sendProcurementNotification_: response %s %s',
+               resp.getResponseCode(), resp.getContentText());
+  } catch (err) {
+    Logger.log('sendProcurementNotification_ error: ' + err);
+  }
+}
+
+/******************************************************
  * DISCORD → PART REQUESTS
  ******************************************************/
 
@@ -244,7 +316,25 @@ function handleDiscordRequest_(body) {
   partRequestsSheet.getRange(nextRow, 15).setValue(maxBudget);
   partRequestsSheet.getRange(nextRow, 17).setValue('Requested');
   partRequestsSheet.getRange(nextRow, 18).setValue(notes);
-  partRequestsSheet.getRange(nextRow, 19).setValue(expeditedShip);
+  partRequestsSheet.getRange(nextRow, 19).setValue(expeditedShipping);
+
+  enrichPartRequest(nextRow, notes);
+
+  // Send procurement notification to Discord
+  sendProcurementNotification_({
+    requestID: requestID,
+    timestamp: timestamp,
+    requester: requester,
+    subsystem: subsystem,
+    partName: '',   // filled later by AI
+    sku: '',
+    link: partLink,
+    quantity: quantity,
+    priority: priority,
+    neededBy: neededBy,
+    maxBudget: maxBudget,
+    notes: notes
+  });
 
   try {
     Logger.log('handleDiscordRequest_: calling enrichPartRequest for row ' + nextRow);
@@ -252,6 +342,22 @@ function handleDiscordRequest_(body) {
   } catch (err) {
     Logger.log('enrichPartRequest error for row ' + nextRow + ': ' + err);
   }
+
+  // Send procurement notification to Discord
+  sendProcurementNotification_({
+    requestID: requestID,
+    timestamp: timestamp,
+    requester: requester,
+    subsystem: subsystem,
+    partName: '',   // AI later
+    sku: '',
+    link: partLink,
+    quantity: quantity,
+    priority: priority,
+    neededBy: neededBy,
+    maxBudget: maxBudget,
+    notes: notes
+  });
 
   return jsonResponse_({ status: 'ok', requestID: requestID });
 }
