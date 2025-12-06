@@ -174,45 +174,64 @@ async function handleRequestPart(interaction) {
     link: interaction.options.getString('link') || '',
     qty: interaction.options.getInteger('qty') || 1,
     maxBudget: interaction.options.getNumber('maxbudget') || '',
-    priority: interaction.options.getString('priority') || PRIORITIES.MEDIUM,  // *** CHANGED ***
+    priority: interaction.options.getString('priority') || 'Medium',
     notes: interaction.options.getString('notes') || ''
   };
-
-  // Validation already handled by Discord's built-in validators
 
   await interaction.deferReply({ ephemeral: true });
 
   try {
-    // *** USE CONSTANTS FOR FIELD NAMES ***
     const payload = {
-      [REQUEST_FIELDS.ACTION]: API_ACTIONS.DISCORD_REQUEST,
-      [REQUEST_FIELDS.REQUESTER]: interaction.user.username,
-      [REQUEST_FIELDS.SUBSYSTEM]: input.subsystem,
-      [REQUEST_FIELDS.PART_LINK]: input.link,
-      [REQUEST_FIELDS.QUANTITY]: input.qty,
-      [REQUEST_FIELDS.NEEDED_BY]: '',
-      [REQUEST_FIELDS.MAX_BUDGET]: input.maxBudget,
-      [REQUEST_FIELDS.PRIORITY]: input.priority,
-      [REQUEST_FIELDS.NOTES]: `[Discord] ${input.notes}`.trim()
+      action: 'discordRequest',  // Use old format for now
+      requester: interaction.user.username,
+      subsystem: input.subsystem,
+      partLink: input.link,
+      quantity: input.qty,
+      neededBy: '',
+      maxBudget: input.maxBudget,
+      priority: input.priority,
+      notes: `[Discord] ${input.notes}`.trim()
     };
 
-    const data = await postWithRetry(CONFIG.APPS_SCRIPT_URL, payload);
+    console.log('[handleRequestPart] Sending payload:', JSON.stringify(payload, null, 2));
 
-    // *** CHECK RESPONSE STATUS USING CONSTANT ***
-    if (data[RESPONSE_FIELDS.STATUS] !== API_STATUS.OK) {
-      console.error('[handleRequestPart] Error from Apps Script:', data);
+    const response = await postWithRetry(CONFIG.APPS_SCRIPT_URL, payload);
+    
+    // *** ADD THIS DEBUGGING ***
+    console.log('[handleRequestPart] Raw response:', JSON.stringify(response, null, 2));
+    console.log('[handleRequestPart] Response type:', typeof response);
+    console.log('[handleRequestPart] Response keys:', Object.keys(response));
+
+    // Check for error in response
+    if (!response) {
+      return interaction.editReply('❌ No response from Google Sheets');
+    }
+
+    // Try to access status field
+    const status = response.status || response.STATUS;
+    console.log('[handleRequestPart] Status:', status);
+
+    if (status !== 'ok') {
+      console.error('[handleRequestPart] Error response:', response);
       
-      // Handle structured error response
-      const errorMsg = data[RESPONSE_FIELDS.ERROR]?.[RESPONSE_FIELDS.ERROR_MESSAGE] 
-        || data.message  // Fallback for old format
-        || 'Unknown error';
+      // Try multiple ways to get error message
+      const errorMsg = 
+        response.error?.message ||  // New format
+        response.message ||          // Old format
+        response.error ||            // String error
+        'Unknown error';
       
       return interaction.editReply(`❌ Error from Sheets: ${errorMsg}`);
     }
 
-    // *** ACCESS DATA FIELDS USING CONSTANTS ***
-    const responseData = data[RESPONSE_FIELDS.DATA] || data;  // Support both new and old format
-    const requestID = responseData[RESPONSE_FIELDS.REQUEST_ID] || responseData.requestID;
+    // Try to get requestID from multiple locations
+    const requestID = 
+      response.data?.requestID ||   // New format with data wrapper
+      response.requestID ||          // Old format
+      response.data?.REQUEST_ID ||   // New format with capital ID
+      'UNKNOWN';
+
+    console.log('[handleRequestPart] Request ID:', requestID);
 
     const responseLines = [
       `✅ Request **${requestID}** submitted.`,
@@ -228,7 +247,8 @@ async function handleRequestPart(interaction) {
     return interaction.editReply(responseLines.join('\n'));
 
   } catch (err) {
-    console.error('[handleRequestPart] Error:', err.message);
+    console.error('[handleRequestPart] Exception:', err);
+    console.error('[handleRequestPart] Stack:', err.stack);
     return interaction.editReply(
       '❌ Failed to send request to Google Sheets. Please try again later.'
     );

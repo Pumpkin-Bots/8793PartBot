@@ -50,74 +50,65 @@
 // ============================================
 
 function doPost(e) {
-  let traceId = null;
-  
   try {
     if (!e || !e.postData || !e.postData.contents) {
-      return jsonResponse_(
-        createErrorResponse(
-          ERROR_CODES.MISSING_PARAMETER,
-          'No post data provided',
-          false
-        )
-      );
+      return jsonResponse_({ status: 'error', message: 'No post data' });
     }
 
     const raw = e.postData.contents;
     Logger.log('[doPost] Raw body: ' + raw);
 
-    const body = JSON.parse(raw);
-    
-    // Generate trace ID for request tracking
-    traceId = body[REQUEST_FIELDS.TRACE_ID] || generateTraceId_();
-    Logger.log(`[${traceId}] Processing action: ${body[REQUEST_FIELDS.ACTION]}`);
-
-    const action = body[REQUEST_FIELDS.ACTION];
-
-    // Route to appropriate handler using constants
-    switch (action) {
-      case API_ACTIONS.HEALTH:
-        return handleHealth_(traceId);
-        
-      case API_ACTIONS.INVENTORY:
-        Logger.log(`[${traceId}] Inventory action, sku="${body[REQUEST_FIELDS.SKU] || ''}" search="${body[REQUEST_FIELDS.SEARCH] || ''}"`);
-        return handleInventoryLookup_({
-          [REQUEST_FIELDS.SKU]: body[REQUEST_FIELDS.SKU] || '',
-          [REQUEST_FIELDS.SEARCH]: body[REQUEST_FIELDS.SEARCH] || ''
-        }, traceId);
-        
-      case API_ACTIONS.DISCORD_REQUEST:
-        return handleDiscordRequest_(body, traceId);
-        
-      case API_ACTIONS.ORDER_STATUS:
-        return handleOrderStatus_(body, traceId);
-        
-      case API_ACTIONS.OPEN_ORDERS:
-        return handleOpenOrders_(body, traceId);
-        
-      default:
-        return jsonResponse_(
-          createErrorResponse(
-            ERROR_CODES.INVALID_ACTION,
-            `Unknown action: ${action}`,
-            false,
-            { receivedAction: action, validActions: Object.values(API_ACTIONS) },
-            traceId
-          )
-        );
+    let body;
+    try {
+      body = JSON.parse(raw);
+    } catch (parseErr) {
+      Logger.log('[doPost] JSON parse error: ' + parseErr);
+      return jsonResponse_({ status: 'error', message: 'Invalid JSON' });
     }
 
+    Logger.log('[doPost] Parsed body: ' + JSON.stringify(body));
+
+    const action = body.action || body[REQUEST_FIELDS.ACTION];
+    Logger.log('[doPost] Action: ' + action);
+
+    // Handle actions - support both old and new constant names
+    if (action === 'inventory' || action === API_ACTIONS.INVENTORY) {
+      return handleInventoryLookup_({
+        sku: body.sku || body[REQUEST_FIELDS.SKU] || '',
+        search: body.search || body[REQUEST_FIELDS.SEARCH] || ''
+      }, null);
+    }
+
+    if (action === 'discordRequest' || action === API_ACTIONS.DISCORD_REQUEST) {
+      return handleDiscordRequest_(body, null);
+    }
+
+    if (action === 'orderStatus' || action === API_ACTIONS.ORDER_STATUS) {
+      return handleOrderStatus_(body, null);
+    }
+
+    if (action === 'openOrders' || action === API_ACTIONS.OPEN_ORDERS) {
+      return handleOpenOrders_(body, null);
+    }
+
+    if (action === 'health' || action === API_ACTIONS.HEALTH) {
+      return jsonResponse_({ 
+        status: 'ok', 
+        version: API_VERSION,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    Logger.log('[doPost] Unknown action: ' + action);
+    return jsonResponse_({ status: 'error', message: 'Unknown action: ' + action });
+
   } catch (err) {
-    Logger.log(`[${traceId || 'unknown'}] doPost error: ${err}`);
-    return jsonResponse_(
-      createErrorResponse(
-        ERROR_CODES.INTERNAL_ERROR,
-        'Internal server error',
-        true,
-        { error: err.toString() },
-        traceId
-      )
-    );
+    Logger.log('[doPost] Error: ' + err);
+    Logger.log('[doPost] Stack: ' + err.stack);
+    return jsonResponse_({ 
+      status: 'error', 
+      message: err.toString() 
+    });
   }
 }
 
@@ -138,9 +129,10 @@ function generateTraceId_() {
  * @param {object} responseObj - Response object
  * @returns {ContentService.TextOutput} JSON response
  */
-function jsonResponse_(responseObj) {
+function jsonResponse_(obj) {
+  Logger.log('[jsonResponse_] Sending: ' + JSON.stringify(obj));
   return ContentService
-    .createTextOutput(JSON.stringify(responseObj))
+    .createTextOutput(JSON.stringify(obj))
     .setMimeType(ContentService.MimeType.JSON);
 }
 
@@ -168,67 +160,30 @@ function handleHealth_(traceId) {
 
 function handleDiscordRequest_(body, traceId) {
   try {
-    // Validate required fields
-    const requiredFieldsError = validateRequiredFields(body, [
-      REQUEST_FIELDS.SUBSYSTEM
-    ]);
-    
-    if (requiredFieldsError) {
-      return jsonResponse_(requiredFieldsError);
-    }
-
-    // Validate subsystem
-    const subsystemError = validateSubsystem(body[REQUEST_FIELDS.SUBSYSTEM]);
-    if (subsystemError) {
-      return jsonResponse_(subsystemError);
-    }
-
-    // Validate quantity if provided
-    const quantity = body[REQUEST_FIELDS.QUANTITY] || 1;
-    const quantityError = validateQuantity(quantity);
-    if (quantityError) {
-      return jsonResponse_(quantityError);
-    }
-
-    // Validate budget if provided
-    const budgetError = validateBudget(body[REQUEST_FIELDS.MAX_BUDGET]);
-    if (budgetError) {
-      return jsonResponse_(budgetError);
-    }
-
-    // Validate priority if provided
-    const priority = body[REQUEST_FIELDS.PRIORITY] || PRIORITIES.MEDIUM;
-    const priorityError = validatePriority(priority);
-    if (priorityError) {
-      return jsonResponse_(priorityError);
-    }
-
-    // Extract and validate data using constants
     const requestData = {
       timestamp: new Date(),
-      requester: body[REQUEST_FIELDS.REQUESTER] || 'Discord User',
-      subsystem: body[REQUEST_FIELDS.SUBSYSTEM],
-      partLink: body[REQUEST_FIELDS.PART_LINK] || '',
-      quantity: quantity,
-      neededBy: body[REQUEST_FIELDS.NEEDED_BY] || '',
-      maxBudget: body[REQUEST_FIELDS.MAX_BUDGET] || '',
-      priority: priority,
-      notes: body[REQUEST_FIELDS.NOTES] || ''
+      requester: body.requester || body[REQUEST_FIELDS.REQUESTER] || 'Discord User',
+      subsystem: body.subsystem || body[REQUEST_FIELDS.SUBSYSTEM],
+      partLink: body.partLink || body[REQUEST_FIELDS.PART_LINK] || '',
+      quantity: body.quantity || body[REQUEST_FIELDS.QUANTITY] || 1,
+      neededBy: body.neededBy || body[REQUEST_FIELDS.NEEDED_BY] || '',
+      maxBudget: body.maxBudget || body[REQUEST_FIELDS.MAX_BUDGET] || '',
+      priority: body.priority || body[REQUEST_FIELDS.PRIORITY] || 'Medium',
+      notes: body.notes || body[REQUEST_FIELDS.NOTES] || ''
     };
 
     const { requestID, row } = createPartRequest_(requestData);
 
-    Logger.log(`[${traceId}] Created request ${requestID} at row ${row}`);
+    Logger.log(`[${traceId || 'no-trace'}] Created request ${requestID} at row ${row}`);
 
     // Enrich with AI
     try {
-      Logger.log(`[${traceId}] Calling enrichPartRequest for row ${row}`);
       enrichPartRequest(row, requestData.notes);
     } catch (err) {
-      Logger.log(`[${traceId}] Enrichment error for row ${row}: ${err}`);
+      Logger.log(`[${traceId || 'no-trace'}] Enrichment error: ${err}`);
     }
 
-    // Send Discord notification
+    // Send notification
     sendProcurementNotification_({
       requestID: requestID,
       timestamp: requestData.timestamp,
@@ -244,28 +199,21 @@ function handleDiscordRequest_(body, traceId) {
       notes: requestData.notes
     });
 
-    // Return success response using standard format
-    return jsonResponse_(
-      createSuccessResponse(
-        { 
-          [RESPONSE_FIELDS.REQUEST_ID]: requestID,
-          row: row
-        },
-        traceId
-      )
-    );
+    // *** RETURN OLD FORMAT FOR NOW ***
+    return jsonResponse_({ 
+      status: 'ok', 
+      requestID: requestID 
+    });
 
   } catch (err) {
-    Logger.log(`[${traceId}] handleDiscordRequest_ error: ${err}`);
-    return jsonResponse_(
-      createErrorResponse(
-        ERROR_CODES.INTERNAL_ERROR,
-        'Failed to create request',
-        true,
-        { error: err.toString() },
-        traceId
-      )
-    );
+    Logger.log(`[${traceId || 'no-trace'}] handleDiscordRequest_ error: ${err}`);
+    Logger.log(`[${traceId || 'no-trace'}] Stack: ${err.stack}`);
+    
+    // Return old error format
+    return jsonResponse_({ 
+      status: 'error', 
+      message: err.toString() 
+    });
   }
 }
 
@@ -695,6 +643,19 @@ function handleOpenOrders_(body, traceId) {
         traceId
       )
     );
+  }
+}
+
+function testConstants() {
+  try {
+    Logger.log('Testing constants availability...');
+    Logger.log('API_ACTIONS: ' + JSON.stringify(API_ACTIONS));
+    Logger.log('REQUEST_FIELDS: ' + JSON.stringify(REQUEST_FIELDS));
+    Logger.log('VALIDATION_LIMITS: ' + JSON.stringify(VALIDATION_LIMITS));
+    Logger.log('All constants loaded successfully!');
+  } catch (err) {
+    Logger.log('ERROR: Constants not loaded: ' + err);
+    Logger.log('Make sure SharedConstants.gs file exists in your Apps Script project');
   }
 }
 
