@@ -28,19 +28,102 @@
  */
 
 /******************************************************
- * CONFIG
+ * CONSOLIDATED CONFIGURATION
  ******************************************************/
 
-// Sheet (tab) names
-const PART_REQUESTS_SHEET_NAME         = 'Part Requests';
-const ORDERS_SHEET_NAME                = 'Orders';
-const INVENTORY_SHEET_NAME             = 'Inventory';
-const DISCORD_PROCUREMENT_WEBHOOK_PROP = 'DISCORD_PROCUREMENT_WEBHOOK_URL';
-const DISCORD_PROCUREMENT_ROLE_PROP    = 'DISCORD_PROCUREMENT_ROLE_ID';
+// Sheet names
+const SHEET_NAMES = {
+  PART_REQUESTS: 'Part Requests',
+  ORDERS: 'Orders',
+  INVENTORY: 'Inventory',
+  BOM_IMPORT: 'Onshape_BOM'
+};
+
+// Script property keys
+const SCRIPT_PROPERTIES = {
+  DISCORD_PROCUREMENT_WEBHOOK: 'DISCORD_PROCUREMENT_WEBHOOK_URL',
+  DISCORD_PROCUREMENT_ROLE: 'DISCORD_PROCUREMENT_ROLE_ID',
+  OPENAI_API_KEY: 'OPENAI_API_KEY'
+};
+
+// API Configuration
+const API_CONFIG = {
+  OPENAI_MODEL: 'gpt-4o-mini',
+  OPENAI_ENDPOINT: 'https://api.openai.com/v1/chat/completions'
+};
+
+/******************************************************
+ * COLUMN INDEX CONSTANTS
+ ******************************************************/
+
+// Part Requests sheet columns (1-based indexing for Google Sheets)
+const PART_REQUESTS_COLS = {
+  ID: 1,
+  TIMESTAMP: 2,
+  REQUESTER: 3,
+  SUBSYSTEM: 4,
+  PART_NAME: 5,
+  SKU: 6,
+  PART_LINK: 7,
+  QUANTITY: 8,
+  PRIORITY: 9,
+  NEEDED_BY: 10,
+  INVENTORY_ON_HAND: 11,
+  VENDOR_STOCK: 12,
+  EST_UNIT_PRICE: 13,
+  TOTAL_EST_COST: 14,
+  MAX_BUDGET: 15,
+  BUDGET_STATUS: 16,
+  REQUEST_STATUS: 17,
+  MENTOR_NOTES: 18,
+  EXPEDITED_SHIPPING: 19
+};
+
+// Orders sheet columns (1-based indexing)
+const ORDERS_COLS = {
+  ORDER_ID: 1,
+  INCLUDED_REQUEST_IDS: 2,
+  VENDOR: 3,
+  PART_NAME: 4,
+  SKU: 5,
+  QTY_ORDERED: 6,
+  FINAL_UNIT_PRICE: 7,
+  TOTAL_COST: 8,
+  ORDER_DATE: 9,
+  SHIPPING_METHOD: 10,
+  TRACKING: 11,
+  ETA: 12,
+  RECEIVED_DATE: 13,
+  ORDER_STATUS: 14,
+  MENTOR_NOTES: 15
+};
+
+// Inventory sheet columns (1-based indexing)
+const INVENTORY_COLS = {
+  SKU: 1,
+  VENDOR: 2,
+  PART_NAME: 3,
+  LOCATION: 4,
+  QTY_ON_HAND: 5
+};
+
+// Form response columns (0-based indexing - matches form data array)
+const FORM_COLS = {
+  TIMESTAMP: 0,
+  REQUESTER: 1,
+  SUBSYSTEM: 2,
+  PART_LINK: 3,
+  NEEDED_BY: 4,
+  QUANTITY: 5,
+  MAX_BUDGET: 6,
+  PRIORITY: 7,
+  NOTES: 8
+};
 
 /******************************************************
  * NORMALIZATION & HEADER HELPERS
  ******************************************************/
+
 function normalizeSku(value) {
   return String(value || '')
     .trim()
@@ -56,25 +139,10 @@ function findColumnIndex_(header, matchFn) {
   return -1;
 }
 
-/***********************
- * 8793PartBot – BOM Import Config
- ***********************/
-const BOM_IMPORT_CONFIG = {
-  BOM_SHEET_NAME: 'Onshape_BOM',        // Sheet with imported Onshape BOM CSV
-  REQUESTS_SHEET_NAME: 'Requests',      // Main ordering / requests sheet
-  OPENAI_MODEL: 'gpt-4o-mini',          // Model for enrichment
-  OPENAI_PROPERTY_KEY: 'OPENAI_API_KEY' // Script property name for the API key
-};
-
-// Script property holding your OpenAI API key
-const OPENAI_KEY_PROPERTY_NAME = 'OPENAI_API_KEY';
-
-// OpenAI model to use
-const OPENAI_MODEL = 'gpt-4.1-mini';
-
 /******************************************************
  * TEMPORARY - FOR TEST
  ******************************************************/
+
 function doGet(e) {
   return ContentService
     .createTextOutput('OK FROM FRC PURCHASING WEB APP')
@@ -84,6 +152,7 @@ function doGet(e) {
 /******************************************************
  * MENU AND UI
  ******************************************************/
+
 function onOpen() {
   const ui = SpreadsheetApp.getUi();
   ui.createMenu('FRC Purchasing')
@@ -96,70 +165,92 @@ function onOpen() {
  * FORM → PART REQUESTS
  * Trigger: From spreadsheet → On form submit
  ******************************************************/
+
 function onFormSubmit(e) {
   const ss = SpreadsheetApp.getActive();
   const formResponsesSheet = e.range.getSheet();
-  const partRequestsSheet  = ss.getSheetByName(PART_REQUESTS_SHEET_NAME);
-
+  
   const formRow = e.range.getRow();
   const formData = formResponsesSheet
     .getRange(formRow, 1, 1, formResponsesSheet.getLastColumn())
     .getValues()[0];
-
-  // Form columns (assumed):
-  // 0 Timestamp
-  // 1 Requester
-  // 2 Subsystem
-  // 3 Part Link
-  // 4 Needed By
-  // 5 Quantity
-  // 6 Max Budget
-  // 7 Priority
-  // 8 Notes (optional)
-
-  const timestamp  = formData[0];
-  const requester  = formData[1];
-  const subsystem  = formData[2];
-  const partLink   = formData[3];
-  const neededBy   = formData[4];
-  const quantity   = formData[5];
-  const maxBudget  = formData[6];
-  const priority   = formData[7];
-  const notes      = formData[8] || '';
-
-  const uuid = Utilities.getUuid().split('-')[0];
-  const requestID = 'REQ-' + uuid;
-  const expeditedShipping = (priority === 'Critical') ? 'Expedited' : 'Standard';
-
-  const nextRow = partRequestsSheet.getLastRow() + 1;
-
-  // Part Requests columns:
-  // 1 ID, 2 Timestamp, 3 Requester, 4 Subsystem, 5 Part Name,
-  // 6 SKU, 7 Part Link, 8 Qty, 9 Priority, 10 Needed By,
-  // 11 Inventory On-Hand, 12 Vendor Stock, 13 Est Unit Price,
-  // 14 Total Est Cost, 15 Max Budget, 16 Budget Status,
-  // 17 Request Status, 18 Mentor Notes, 19 Expedited Shipping
-
-  partRequestsSheet.getRange(nextRow, 1).setValue(requestID);
-  partRequestsSheet.getRange(nextRow, 2).setValue(timestamp);
-  partRequestsSheet.getRange(nextRow, 3).setValue(requester);
-  partRequestsSheet.getRange(nextRow, 4).setValue(subsystem);
-  partRequestsSheet.getRange(nextRow, 7).setValue(partLink);
-  partRequestsSheet.getRange(nextRow, 8).setValue(quantity);
-  partRequestsSheet.getRange(nextRow, 9).setValue(priority);
-  partRequestsSheet.getRange(nextRow, 10).setValue(neededBy);
-  partRequestsSheet.getRange(nextRow, 15).setValue(maxBudget);
-  partRequestsSheet.getRange(nextRow, 17).setValue('Requested');
-  partRequestsSheet.getRange(nextRow, 18).setValue(notes);
-  partRequestsSheet.getRange(nextRow, 19).setValue(expeditedShipping);
-
-  enrichPartRequest(nextRow, notes);
+  
+  // Extract form data using constants
+  const requestData = {
+    timestamp: formData[FORM_COLS.TIMESTAMP],
+    requester: formData[FORM_COLS.REQUESTER],
+    subsystem: formData[FORM_COLS.SUBSYSTEM],
+    partLink: formData[FORM_COLS.PART_LINK],
+    neededBy: formData[FORM_COLS.NEEDED_BY],
+    quantity: formData[FORM_COLS.QUANTITY],
+    maxBudget: formData[FORM_COLS.MAX_BUDGET],
+    priority: formData[FORM_COLS.PRIORITY],
+    notes: formData[FORM_COLS.NOTES] || ''
+  };
+  
+  const { requestID, row } = createPartRequest_(requestData);
+  
+  // Enrich with AI
+  try {
+    enrichPartRequest(row, requestData.notes);
+  } catch (err) {
+    Logger.log('[onFormSubmit] Enrichment error for row ' + row + ': ' + err);
+  }
 }
 
+/******************************************************
+ * CREATE PART REQUEST (shared by form and Discord)
+ ******************************************************/
+
+/**
+ * Creates a new part request in the Part Requests sheet
+ * @param {Object} data - Request data
+ * @param {Date} data.timestamp - Request timestamp
+ * @param {string} data.requester - Name of requester
+ * @param {string} data.subsystem - Subsystem name
+ * @param {string} data.partLink - URL to part
+ * @param {number} data.quantity - Quantity needed
+ * @param {string} data.priority - Priority level
+ * @param {string} data.neededBy - Date needed by
+ * @param {string} data.maxBudget - Maximum budget
+ * @param {string} data.notes - Additional notes
+ * @returns {Object} Object containing requestID and row number
+ */
+function createPartRequest_(data) {
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  
+  if (!sheet) {
+    throw new Error('Sheet not found: ' + SHEET_NAMES.PART_REQUESTS);
+  }
+  
+  const uuid = Utilities.getUuid().split('-')[0];
+  const requestID = 'REQ-' + uuid;
+  const nextRow = sheet.getLastRow() + 1;
+  
+  const expeditedShipping = (data.priority === 'Critical') ? 'Expedited' : 'Standard';
+  
+  // Use column constants instead of magic numbers
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.ID).setValue(requestID);
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.TIMESTAMP).setValue(data.timestamp);
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.REQUESTER).setValue(data.requester);
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.SUBSYSTEM).setValue(data.subsystem);
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.PART_LINK).setValue(data.partLink);
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.QUANTITY).setValue(data.quantity);
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.PRIORITY).setValue(data.priority);
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.NEEDED_BY).setValue(data.neededBy);
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.MAX_BUDGET).setValue(data.maxBudget);
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.REQUEST_STATUS).setValue('Requested');
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(data.notes);
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.EXPEDITED_SHIPPING).setValue(expeditedShipping);
+  
+  return { requestID, row: nextRow };
+}
 
 /******************************************************
  * doPost – Web App endpoint for Discord
  ******************************************************/
+
 function doPost(e) {
   try {
     if (!e || !e.postData || !e.postData.contents) {
@@ -167,13 +258,13 @@ function doPost(e) {
     }
 
     const raw = e.postData.contents;
-    Logger.log('doPost raw body: ' + raw);
+    Logger.log('[doPost] Raw body: ' + raw);
 
     const body = JSON.parse(raw);
 
     // Inventory lookup
     if (body.action === 'inventory') {
-      Logger.log('doPost: inventory action, sku="%s" search="%s"', body.sku || '', body.search || '');
+      Logger.log('[doPost] Inventory action, sku="%s" search="%s"', body.sku || '', body.search || '');
       return handleInventoryLookup_({
         sku: body.sku || '',
         search: body.search || ''
@@ -198,7 +289,7 @@ function doPost(e) {
     return jsonResponse_({ status: 'error', message: 'Unknown action' });
 
   } catch (err) {
-    Logger.log('doPost error: ' + err);
+    Logger.log('[doPost] Error: ' + err);
     return jsonResponse_({ status: 'error', message: err.toString() });
   }
 }
@@ -212,15 +303,17 @@ function jsonResponse_(obj) {
 /******************************************************
  * DISCORD PROCUREMENT NOTIFICATION (via Webhook)
  ******************************************************/
+
 function sendProcurementNotification_(request) {
   const props = PropertiesService.getScriptProperties();
-  const webhookUrl = props.getProperty(DISCORD_PROCUREMENT_WEBHOOK_PROP);
+  const webhookUrl = props.getProperty(SCRIPT_PROPERTIES.DISCORD_PROCUREMENT_WEBHOOK);
+  
   if (!webhookUrl) {
-    Logger.log('sendProcurementNotification_: no DISCORD_PROCUREMENT_WEBHOOK_URL configured; skipping.');
+    Logger.log('[sendProcurementNotification_] No webhook URL configured; skipping.');
     return;
   }
 
-  const roleId  = props.getProperty(DISCORD_PROCUREMENT_ROLE_PROP);
+  const roleId = props.getProperty(SCRIPT_PROPERTIES.DISCORD_PROCUREMENT_ROLE);
   const rolePing = roleId ? `<@&${roleId}>` : '';
 
   const {
@@ -272,10 +365,10 @@ function sendProcurementNotification_(request) {
       muteHttpExceptions: true
     });
 
-    Logger.log('sendProcurementNotification_: response %s %s',
+    Logger.log('[sendProcurementNotification_] Response: %s %s',
                resp.getResponseCode(), resp.getContentText());
   } catch (err) {
-    Logger.log('sendProcurementNotification_ error: ' + err);
+    Logger.log('[sendProcurementNotification_] Error: ' + err);
   }
 }
 
@@ -284,115 +377,71 @@ function sendProcurementNotification_(request) {
  ******************************************************/
 
 function handleDiscordRequest_(body) {
-  const ss = SpreadsheetApp.getActive();
-  const partRequestsSheet = ss.getSheetByName(PART_REQUESTS_SHEET_NAME);
-  if (!partRequestsSheet) {
-    throw new Error('Sheet not found: ' + PART_REQUESTS_SHEET_NAME);
-  }
-
-  const timestamp     = new Date();
-  const requester     = body.requester || 'Discord User';
-  const subsystem     = body.subsystem || '';
-  const partLink      = body.partLink || '';
-  const quantity      = body.quantity || 1;
-  const neededBy      = body.neededBy || '';
-  const maxBudget     = body.maxBudget || '';
-  const priority      = body.priority || 'Medium';
-  const notes         = body.notes || '';
-  const expeditedShip = (priority === 'Critical') ? 'Expedited' : 'Standard';
-
-  const uuid = Utilities.getUuid().split('-')[0];
-  const requestID = 'REQ-' + uuid;
-  const nextRow = partRequestsSheet.getLastRow() + 1;
-
-  partRequestsSheet.getRange(nextRow, 1).setValue(requestID);
-  partRequestsSheet.getRange(nextRow, 2).setValue(timestamp);
-  partRequestsSheet.getRange(nextRow, 3).setValue(requester);
-  partRequestsSheet.getRange(nextRow, 4).setValue(subsystem);
-  partRequestsSheet.getRange(nextRow, 7).setValue(partLink);
-  partRequestsSheet.getRange(nextRow, 8).setValue(quantity);
-  partRequestsSheet.getRange(nextRow, 9).setValue(priority);
-  partRequestsSheet.getRange(nextRow, 10).setValue(neededBy);
-  partRequestsSheet.getRange(nextRow, 15).setValue(maxBudget);
-  partRequestsSheet.getRange(nextRow, 17).setValue('Requested');
-  partRequestsSheet.getRange(nextRow, 18).setValue(notes);
-  partRequestsSheet.getRange(nextRow, 19).setValue(expeditedShipping);
-
-  enrichPartRequest(nextRow, notes);
-
-  // Send procurement notification to Discord
-  sendProcurementNotification_({
-    requestID: requestID,
-    timestamp: timestamp,
-    requester: requester,
-    subsystem: subsystem,
-    partName: '',   // filled later by AI
-    sku: '',
-    link: partLink,
-    quantity: quantity,
-    priority: priority,
-    neededBy: neededBy,
-    maxBudget: maxBudget,
-    notes: notes
-  });
-
+  const requestData = {
+    timestamp: new Date(),
+    requester: body.requester || 'Discord User',
+    subsystem: body.subsystem || '',
+    partLink: body.partLink || '',
+    quantity: body.quantity || 1,
+    neededBy: body.neededBy || '',
+    maxBudget: body.maxBudget || '',
+    priority: body.priority || 'Medium',
+    notes: body.notes || ''
+  };
+  
+  const { requestID, row } = createPartRequest_(requestData);
+  
+  // Enrich with AI
   try {
-    Logger.log('handleDiscordRequest_: calling enrichPartRequest for row ' + nextRow);
-    enrichPartRequest(nextRow, notes);
+    Logger.log('[handleDiscordRequest_] Calling enrichPartRequest for row ' + row);
+    enrichPartRequest(row, requestData.notes);
   } catch (err) {
-    Logger.log('enrichPartRequest error for row ' + nextRow + ': ' + err);
+    Logger.log('[handleDiscordRequest_] Enrichment error for row ' + row + ': ' + err);
   }
-
-  // Send procurement notification to Discord
+  
+  // Send Discord notification
   sendProcurementNotification_({
     requestID: requestID,
-    timestamp: timestamp,
-    requester: requester,
-    subsystem: subsystem,
-    partName: '',   // AI later
+    timestamp: requestData.timestamp,
+    requester: requestData.requester,
+    subsystem: requestData.subsystem,
+    partName: '',   // AI fills later
     sku: '',
-    link: partLink,
-    quantity: quantity,
-    priority: priority,
-    neededBy: neededBy,
-    maxBudget: maxBudget,
-    notes: notes
+    link: requestData.partLink,
+    quantity: requestData.quantity,
+    priority: requestData.priority,
+    neededBy: requestData.neededBy,
+    maxBudget: requestData.maxBudget,
+    notes: requestData.notes
   });
-
+  
   return jsonResponse_({ status: 'ok', requestID: requestID });
 }
 
 /******************************************************
- * FUNCTION TO MOVE PURCHASE SHEET 
+ * FUNCTION TO HANDLE STATUS CHANGE TO "APPROVED"
  ******************************************************/
+
 function onEdit(e) {
-  // Safety: make sure we have event data
   if (!e || !e.range) return;
-
+  
   const sheet = e.range.getSheet();
-  // Only watch the Part Requests sheet
-  if (sheet.getName() !== PART_REQUESTS_SHEET_NAME) return;
-
+  if (sheet.getName() !== SHEET_NAMES.PART_REQUESTS) return;
+  
   const row = e.range.getRow();
   const col = e.range.getColumn();
-
-  // Ignore header row
-  if (row === 1) return;
-
-  // Column 17 = Request Status
-  const STATUS_COL = 17;
-  if (col !== STATUS_COL) return;
-
+  
+  if (row === 1) return; // Skip header
+  if (col !== PART_REQUESTS_COLS.REQUEST_STATUS) return; // Only watch status column
+  
   const newValue = (e.value || '').toString().trim();
-
-  // Only react when the user changes the cell to "Approved"
+  
   if (newValue.toLowerCase() !== 'approved') return;
-
+  
   try {
-    // Create the order and update status to "Ordered"
     approveRequest(row);
   } catch (err) {
-    Logger.log('onEdit approveRequest error for row ' + row + ': ' + err);
+    Logger.log('[onEdit] approveRequest error for row ' + row + ': ' + err);
   }
 }
 
@@ -400,175 +449,137 @@ function onEdit(e) {
  * AI ENRICHMENT (Part Name, SKU, Price, Vendor Stock)
  ******************************************************/
 
+/**
+ * Enriches a part request with AI-generated data
+ * @param {number} row - The row number in Part Requests sheet
+ * @param {string} hintText - Optional hint text to guide AI part selection
+ */
 function enrichPartRequest(row, hintText) {
   const ss = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(PART_REQUESTS_SHEET_NAME);
-  const inventorySheet = ss.getSheetByName(INVENTORY_SHEET_NAME);
-
-  const url = sheet.getRange(row, 7).getValue();
+  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  const inventorySheet = ss.getSheetByName(SHEET_NAMES.INVENTORY);
+  
+  const url = sheet.getRange(row, PART_REQUESTS_COLS.PART_LINK).getValue();
   if (!url) {
-    Logger.log('No URL in row ' + row);
+    Logger.log('[enrichPartRequest] No URL in row ' + row);
     return;
   }
-
+  
   let htmlSnippet = '';
   try {
     const resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
     htmlSnippet = resp.getContentText().substring(0, 15000);
   } catch (err) {
-    Logger.log('Error fetching URL for row ' + row + ': ' + err);
+    Logger.log('[enrichPartRequest] Error fetching URL for row ' + row + ': ' + err);
   }
-
-  const notes = sheet.getRange(row, 18).getValue() || hintText || '';
-
-  const aiData = getPartInfoFromAI(url, htmlSnippet, notes);
+  
+  const notes = sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || hintText || '';
+  
+  const aiData = getPartInfoFromAI_(url, htmlSnippet, notes);
   if (!aiData) {
-    Logger.log('AI enrichment failed for row ' + row);
+    Logger.log('[enrichPartRequest] AI enrichment failed for row ' + row);
     return;
   }
-
-  let partName   = aiData.partName || '';
-  let sku        = aiData.sku || '';
-  const price      = aiData.estimatedPrice || '';
+  
+  let partName = aiData.partName || '';
+  let sku = aiData.sku || '';
+  const price = aiData.estimatedPrice || '';
   const stockState = aiData.stockStatus || '';
-
-  // Special handling: WCP ball bearings multi-variant page
-  const urlLower = url.toLowerCase();
-  if (urlLower.includes('wcproducts.com/collections/cnc-hardware/products/ball-bearings')) {
-    // Use AI name, but do not trust SKU unless it appears in HTML
-    if (sku) {
-      const normalizedHtml = htmlSnippet.toLowerCase();
-      const normalizedSku  = sku.toString().toLowerCase();
-      if (!normalizedHtml.includes(normalizedSku)) {
-        Logger.log('Discarding AI SKU for WCP bearings page row ' + row);
-        sku = '';
-      }
-    }
-  }
-
-  // Final safety: if SKU not found in HTML at all, drop it
-  if (sku) {
-    const normalizedHtml = htmlSnippet.toLowerCase();
-    const normalizedSku  = sku.toString().toLowerCase();
-    if (!normalizedHtml.includes(normalizedSku)) {
-      Logger.log('Discarding AI SKU "' + sku + '" for row ' + row + ' – not found in HTML.');
-      sku = '';
-    }
-  }
-
-  if (partName)   sheet.getRange(row, 5).setValue(partName);
-  if (sku)        sheet.getRange(row, 6).setValue(sku);
-  if (price)      sheet.getRange(row, 13).setValue(price);
-  if (stockState) sheet.getRange(row, 12).setValue(stockState);
-
+  
+  // Validate SKU appears in HTML
+  sku = validateSku_(sku, htmlSnippet, url, row);
+  
+  // Update sheet using column constants
+  if (partName) sheet.getRange(row, PART_REQUESTS_COLS.PART_NAME).setValue(partName);
+  if (sku) sheet.getRange(row, PART_REQUESTS_COLS.SKU).setValue(sku);
+  if (price) sheet.getRange(row, PART_REQUESTS_COLS.EST_UNIT_PRICE).setValue(price);
+  if (stockState) sheet.getRange(row, PART_REQUESTS_COLS.VENDOR_STOCK).setValue(stockState);
+  
+  // Update inventory on-hand
   if (inventorySheet && sku) {
     const rec = getInventoryRecordBySku_(inventorySheet, sku);
     const invOnHand = rec ? rec.quantity : 0;
-
-    Logger.log(
-      'enrichPartRequest row %s: SKU="%s", invOnHand=%s, location="%s"',
-      row,
-      sku,
-      invOnHand,
-      rec ? rec.location : ''
-    );
-
-    sheet.getRange(row, 11).setValue(invOnHand);
+    
+    Logger.log('[enrichPartRequest] Row %s: SKU="%s", invOnHand=%s', row, sku, invOnHand);
+    
+    sheet.getRange(row, PART_REQUESTS_COLS.INVENTORY_ON_HAND).setValue(invOnHand);
   } else {
-    Logger.log(
-      'enrichPartRequest row %s: inventory lookup skipped (inventorySheet=%s, sku="%s")',
-      row,
-      !!inventorySheet,
-      sku
-    );
+    Logger.log('[enrichPartRequest] Row %s: inventory lookup skipped (inventorySheet=%s, sku="%s")',
+               row, !!inventorySheet, sku);
   }
 }
 
+/**
+ * Menu-triggered enrichment for selected row
+ */
 function enrichSelectedFromMenu() {
   const ss = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(PART_REQUESTS_SHEET_NAME);
+  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
   const active = sheet.getActiveRange();
+  
   if (!active) {
     SpreadsheetApp.getUi().alert('Select a row in the Part Requests sheet.');
     return;
   }
+  
   const row = active.getRow();
   if (row === 1) {
     SpreadsheetApp.getUi().alert('Row 1 is headers. Select a data row.');
     return;
   }
-  const notes = sheet.getRange(row, 18).getValue() || '';
+  
+  const notes = sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || '';
   enrichPartRequest(row, notes);
   SpreadsheetApp.getUi().alert('AI enrichment attempted for row ' + row + '.');
 }
 
-function aiEnrichPart(description, partNumber) {
-  const apiKey = PropertiesService.getScriptProperties().getProperty('OPENAI_API_KEY');
-  if (!apiKey) throw new Error("Missing OPENAI_API_KEY in Script Properties.");
-
-  const prompt = `
-  You are an FRC-focused parts identification AI. 
-  Given a part from an Onshape BOM, identify the most likely FRC vendor,
-  SKU, price estimate, and URL.
-
-  Priorities:
-  1. REV Robotics
-  2. WestCoast Products (WCP)
-  3. AndyMark
-  4. McMaster-Carr
-  5. Amazon ONLY if no other option exists.
-
-  Provide JSON ONLY with:
-  {
-    "sku": "...",
-    "vendor": "...",
-    "url": "...",
-    "est_price": "...",
-    "stock_status": "...",
-    "alt_vendors": ["...", "..."],
-    "normalized_description": "..."
+/**
+ * Validates SKU by checking if it appears in HTML content
+ * @param {string} sku - SKU to validate
+ * @param {string} html - HTML content to search
+ * @param {string} url - URL for special case handling
+ * @param {number} row - Row number for logging
+ * @returns {string} Validated SKU or empty string
+ */
+function validateSku_(sku, html, url, row) {
+  if (!sku) return '';
+  
+  const urlLower = url.toLowerCase();
+  const normalizedHtml = html.toLowerCase();
+  const normalizedSku = sku.toString().toLowerCase();
+  
+  // Special handling: WCP ball bearings multi-variant page
+  if (urlLower.includes('wcproducts.com/collections/cnc-hardware/products/ball-bearings')) {
+    if (!normalizedHtml.includes(normalizedSku)) {
+      Logger.log('[validateSku_] Discarding AI SKU for WCP bearings page row ' + row);
+      return '';
+    }
   }
-
-  Part number: ${partNumber}
-  Description: ${description}
-  `;
-
-  const payload = {
-    model: "gpt-4o-mini",
-    messages: [{ role: "user", content: prompt }],
-    temperature: 0.1
-  };
-
-  const response = UrlFetchApp.fetch("https://api.openai.com/v1/chat/completions", {
-    method: "post",
-    contentType: "application/json",
-    payload: JSON.stringify(payload),
-    headers: { Authorization: "Bearer " + apiKey }
-  });
-
-  const json = JSON.parse(response.getContentText());
-
-  try {
-    return JSON.parse(json.choices[0].message.content);
-  } catch (err) {
-    return {
-      sku: "",
-      vendor: "",
-      url: "",
-      est_price: "",
-      stock_status: "",
-      alt_vendors: [],
-      normalized_description: description
-    };
+  
+  // General validation: SKU must appear in HTML
+  if (!normalizedHtml.includes(normalizedSku)) {
+    Logger.log('[validateSku_] Discarding AI SKU "' + sku + '" for row ' + row + ' – not found in HTML.');
+    return '';
   }
+  
+  return sku;
 }
 
-function getPartInfoFromAI(url, htmlSnippet, hintText) {
-  const apiKey = PropertiesService.getScriptProperties().getProperty(OPENAI_KEY_PROPERTY_NAME);
+/**
+ * Calls OpenAI API to extract part information
+ * @param {string} url - Part URL
+ * @param {string} htmlSnippet - HTML content snippet
+ * @param {string} hintText - User hint text
+ * @returns {Object|null} Part information or null if failed
+ */
+function getPartInfoFromAI_(url, htmlSnippet, hintText) {
+  const apiKey = PropertiesService.getScriptProperties()
+    .getProperty(SCRIPT_PROPERTIES.OPENAI_API_KEY);
+  
   if (!apiKey) {
-    throw new Error(OPENAI_KEY_PROPERTY_NAME + ' is not set in Script properties.');
+    throw new Error(SCRIPT_PROPERTIES.OPENAI_API_KEY + ' is not set in Script properties.');
   }
-
+  
   const systemPrompt = `
 You help a high school FRC robotics team identify parts from vendor pages
 (REV Robotics, AndyMark, VEX, McMaster-Carr, DigiKey, Amazon, West Coast Products, etc.).
@@ -598,11 +609,11 @@ Rules:
     "In stock" if normal add-to-cart with no warnings,
     "Unknown" if unclear.
 `;
-
+  
   const hintSection = hintText
     ? `USER HINT:\n${hintText}\n`
     : 'USER HINT: (none)\n';
-
+  
   const userContent = `
 URL: ${url}
 
@@ -611,55 +622,55 @@ ${hintSection}
 HTML SNIPPET (may be truncated):
 ${htmlSnippet}
 `;
-
+  
   const payload = {
-    model: OPENAI_MODEL,
+    model: API_CONFIG.OPENAI_MODEL,
     messages: [
       { role: 'system', content: systemPrompt },
-      { role: 'user',   content: userContent }
+      { role: 'user', content: userContent }
     ],
     response_format: { type: 'json_object' }
   };
-
-  const response = UrlFetchApp.fetch('https://api.openai.com/v1/chat/completions', {
-    method: 'post',
-    contentType: 'application/json',
-    headers: { Authorization: 'Bearer ' + apiKey },
-    payload: JSON.stringify(payload),
-    muteHttpExceptions: true
-  });
-
-  const code = response.getResponseCode();
-  if (code !== 200) {
-    Logger.log('OpenAI error: ' + code + ' ' + response.getContentText());
-    return null;
-  }
-
-  const data = JSON.parse(response.getContentText());
-  const content = data.choices[0].message.content;
-
-  let ai;
+  
   try {
-    ai = JSON.parse(content);
+    const response = UrlFetchApp.fetch(API_CONFIG.OPENAI_ENDPOINT, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { Authorization: 'Bearer ' + apiKey },
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+    
+    const code = response.getResponseCode();
+    if (code !== 200) {
+      Logger.log('[getPartInfoFromAI_] OpenAI error: ' + code + ' ' + response.getContentText());
+      return null;
+    }
+    
+    const data = JSON.parse(response.getContentText());
+    const content = data.choices[0].message.content;
+    const ai = JSON.parse(content);
+    
+    Logger.log('[getPartInfoFromAI_] AI part info for URL ' + url + ': ' + JSON.stringify(ai));
+    return ai;
+    
   } catch (err) {
-    Logger.log('Failed to parse AI JSON: ' + err + ' content=' + content);
+    Logger.log('[getPartInfoFromAI_] Error: ' + err);
     return null;
   }
-
-  Logger.log('AI part info for URL ' + url + ': ' + JSON.stringify(ai));
-  return ai;
 }
 
 /******************************************************
  * ORDER STATUS LOOKUP
  ******************************************************/
+
 function handleOrderStatus_(body) {
   const ss = SpreadsheetApp.getActive();
-  const reqSheet = ss.getSheetByName(PART_REQUESTS_SHEET_NAME);
-  const ordSheet = ss.getSheetByName(ORDERS_SHEET_NAME);
+  const reqSheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  const ordSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
 
   const requestId = (body.requestId || '').toString().trim();
-  const orderId   = (body.orderId   || '').toString().trim();
+  const orderId = (body.orderId || '').toString().trim();
 
   if (!requestId && !orderId) {
     return jsonResponse_({
@@ -675,37 +686,31 @@ function handleOrderStatus_(body) {
     const values = reqSheet.getDataRange().getValues();
     let reqInfo = null;
 
-    // Part Requests columns (0-based):
-    // 0 ID, 1 Timestamp, 2 Requester, 3 Subsystem, 4 Part Name,
-    // 5 SKU, 6 Link, 7 Qty, 8 Priority, 9 Needed By,
-    // 10 Inventory, 11 Vendor Stock, 12 Est Unit Price,
-    // 13 Total Est Cost, 14 Max Budget, 15 Budget Status,
-    // 16 Request Status, 17 Mentor Notes, 18 Expedited Shipping
-
     for (let i = 1; i < values.length; i++) {
       const row = values[i];
-      const id  = (row[0] || '').toString().trim();
+      const id = (row[PART_REQUESTS_COLS.ID - 1] || '').toString().trim();
+      
       if (id === requestId) {
         reqInfo = {
-          id: row[0],
-          timestamp: row[1],
-          requester: row[2],
-          subsystem: row[3],
-          partName: row[4],
-          sku: row[5],
-          link: row[6],
-          qty: row[7],
-          priority: row[8],
-          neededBy: row[9],
-          inventoryOnHand: row[10],
-          vendorStock: row[11],
-          estUnitPrice: row[12],
-          totalEstCost: row[13],
-          maxBudget: row[14],
-          budgetStatus: row[15],
-          requestStatus: row[16],
-          mentorNotes: row[17],
-          shipping: row[18]
+          id: row[PART_REQUESTS_COLS.ID - 1],
+          timestamp: row[PART_REQUESTS_COLS.TIMESTAMP - 1],
+          requester: row[PART_REQUESTS_COLS.REQUESTER - 1],
+          subsystem: row[PART_REQUESTS_COLS.SUBSYSTEM - 1],
+          partName: row[PART_REQUESTS_COLS.PART_NAME - 1],
+          sku: row[PART_REQUESTS_COLS.SKU - 1],
+          link: row[PART_REQUESTS_COLS.PART_LINK - 1],
+          qty: row[PART_REQUESTS_COLS.QUANTITY - 1],
+          priority: row[PART_REQUESTS_COLS.PRIORITY - 1],
+          neededBy: row[PART_REQUESTS_COLS.NEEDED_BY - 1],
+          inventoryOnHand: row[PART_REQUESTS_COLS.INVENTORY_ON_HAND - 1],
+          vendorStock: row[PART_REQUESTS_COLS.VENDOR_STOCK - 1],
+          estUnitPrice: row[PART_REQUESTS_COLS.EST_UNIT_PRICE - 1],
+          totalEstCost: row[PART_REQUESTS_COLS.TOTAL_EST_COST - 1],
+          maxBudget: row[PART_REQUESTS_COLS.MAX_BUDGET - 1],
+          budgetStatus: row[PART_REQUESTS_COLS.BUDGET_STATUS - 1],
+          requestStatus: row[PART_REQUESTS_COLS.REQUEST_STATUS - 1],
+          mentorNotes: row[PART_REQUESTS_COLS.MENTOR_NOTES - 1],
+          shipping: row[PART_REQUESTS_COLS.EXPEDITED_SHIPPING - 1]
         };
         break;
       }
@@ -718,15 +723,9 @@ function handleOrderStatus_(body) {
       const ovals = ordSheet.getDataRange().getValues();
       const linkedOrders = [];
 
-      // Orders columns (0-based):
-      // 0 Order ID, 1 Included Request IDs, 2 Vendor, 3 Part Name, 4 SKU,
-      // 5 Qty Ordered, 6 Final Unit Price, 7 Total Cost, 8 Order Date,
-      // 9 Shipping, 10 Tracking, 11 ETA, 12 Received Date,
-      // 13 Order Status, 14 Mentor Notes
-
       for (let i = 1; i < ovals.length; i++) {
         const row = ovals[i];
-        const includedRaw = (row[1] || '').toString();
+        const includedRaw = (row[ORDERS_COLS.INCLUDED_REQUEST_IDS - 1] || '').toString();
         const ids = includedRaw
           .split(',')
           .map(s => s.trim())
@@ -734,21 +733,21 @@ function handleOrderStatus_(body) {
 
         if (ids.includes(requestId)) {
           linkedOrders.push({
-            orderId: row[0],
+            orderId: row[ORDERS_COLS.ORDER_ID - 1],
             includedRequests: includedRaw,
-            vendor: row[2],
-            partName: row[3],
-            sku: row[4],
-            qty: row[5],
-            unitPrice: row[6],
-            totalCost: row[7],
-            orderDate: row[8],
-            shipping: row[9],
-            tracking: row[10],
-            eta: row[11],
-            receivedDate: row[12],
-            status: row[13],
-            mentorNotes: row[14]
+            vendor: row[ORDERS_COLS.VENDOR - 1],
+            partName: row[ORDERS_COLS.PART_NAME - 1],
+            sku: row[ORDERS_COLS.SKU - 1],
+            qty: row[ORDERS_COLS.QTY_ORDERED - 1],
+            unitPrice: row[ORDERS_COLS.FINAL_UNIT_PRICE - 1],
+            totalCost: row[ORDERS_COLS.TOTAL_COST - 1],
+            orderDate: row[ORDERS_COLS.ORDER_DATE - 1],
+            shipping: row[ORDERS_COLS.SHIPPING_METHOD - 1],
+            tracking: row[ORDERS_COLS.TRACKING - 1],
+            eta: row[ORDERS_COLS.ETA - 1],
+            receivedDate: row[ORDERS_COLS.RECEIVED_DATE - 1],
+            status: row[ORDERS_COLS.ORDER_STATUS - 1],
+            mentorNotes: row[ORDERS_COLS.MENTOR_NOTES - 1]
           });
         }
       }
@@ -764,24 +763,25 @@ function handleOrderStatus_(body) {
 
     for (let i = 1; i < ovals.length; i++) {
       const row = ovals[i];
-      const id  = (row[0] || '').toString().trim();
+      const id = (row[ORDERS_COLS.ORDER_ID - 1] || '').toString().trim();
+      
       if (id === orderId) {
         orderInfo = {
-          orderId: row[0],
-          includedRequests: row[1],
-          vendor: row[2],
-          partName: row[3],
-          sku: row[4],
-          qty: row[5],
-          unitPrice: row[6],
-          totalCost: row[7],
-          orderDate: row[8],
-          shipping: row[9],
-          tracking: row[10],
-          eta: row[11],
-          receivedDate: row[12],
-          status: row[13],
-          mentorNotes: row[14]
+          orderId: row[ORDERS_COLS.ORDER_ID - 1],
+          includedRequests: row[ORDERS_COLS.INCLUDED_REQUEST_IDS - 1],
+          vendor: row[ORDERS_COLS.VENDOR - 1],
+          partName: row[ORDERS_COLS.PART_NAME - 1],
+          sku: row[ORDERS_COLS.SKU - 1],
+          qty: row[ORDERS_COLS.QTY_ORDERED - 1],
+          unitPrice: row[ORDERS_COLS.FINAL_UNIT_PRICE - 1],
+          totalCost: row[ORDERS_COLS.TOTAL_COST - 1],
+          orderDate: row[ORDERS_COLS.ORDER_DATE - 1],
+          shipping: row[ORDERS_COLS.SHIPPING_METHOD - 1],
+          tracking: row[ORDERS_COLS.TRACKING - 1],
+          eta: row[ORDERS_COLS.ETA - 1],
+          receivedDate: row[ORDERS_COLS.RECEIVED_DATE - 1],
+          status: row[ORDERS_COLS.ORDER_STATUS - 1],
+          mentorNotes: row[ORDERS_COLS.MENTOR_NOTES - 1]
         };
         break;
       }
@@ -796,27 +796,28 @@ function handleOrderStatus_(body) {
 /******************************************************
  * INVENTORY LOOKUP – FULL RECORD BY SKU (AGGREGATES MULTIPLE ROWS)
  ******************************************************/
+
+/**
+ * Gets aggregated inventory record by SKU
+ * @param {Sheet} inventorySheet - The inventory sheet
+ * @param {string} sku - SKU to look up
+ * @returns {Object|null} Aggregated inventory record or null
+ */
 function getInventoryRecordBySku_(inventorySheet, sku) {
   if (!sku) {
-    Logger.log('getInventoryRecordBySku_: no SKU provided');
+    Logger.log('[getInventoryRecordBySku_] No SKU provided');
     return null;
   }
 
   const values = inventorySheet.getDataRange().getValues();
   if (!values || values.length < 2) {
-    Logger.log('getInventoryRecordBySku_: inventory empty');
+    Logger.log('[getInventoryRecordBySku_] Inventory empty');
     return null;
   }
 
   const header = values[0];
-  const rows   = values.slice(1);
+  const rows = values.slice(1);
 
-  // Adapt to your actual headers:
-  // A: "Part Number / SKU"
-  // B: "Vendor"
-  // C: "Part Name"
-  // D: "Location"
-  // E: "Qty On-Hand"
   const skuCol = findColumnIndex_(header, h =>
     h.includes('sku') || h.includes('part number')
   );
@@ -824,20 +825,20 @@ function getInventoryRecordBySku_(inventorySheet, sku) {
     h.includes('qty') || h.includes('on-hand')
   );
   const vendorCol = findColumnIndex_(header, h => h.includes('vendor'));
-  const nameCol   = findColumnIndex_(header, h => h.includes('part name'));
-  const locCol    = findColumnIndex_(header, h => h.includes('location'));
+  const nameCol = findColumnIndex_(header, h => h.includes('part name'));
+  const locCol = findColumnIndex_(header, h => h.includes('location'));
 
-  Logger.log('Inventory header: ' + JSON.stringify(header));
-  Logger.log('skuCol=%s qtyCol=%s vendorCol=%s nameCol=%s locCol=%s',
+  Logger.log('[getInventoryRecordBySku_] Header: ' + JSON.stringify(header));
+  Logger.log('[getInventoryRecordBySku_] Columns: skuCol=%s qtyCol=%s vendorCol=%s nameCol=%s locCol=%s',
              skuCol, qtyCol, vendorCol, nameCol, locCol);
 
   if (skuCol === -1 || qtyCol === -1) {
-    Logger.log('getInventoryRecordBySku_: could not find SKU or Qty column');
+    Logger.log('[getInventoryRecordBySku_] Could not find SKU or Qty column');
     return null;
   }
 
   const target = normalizeSku(sku);
-  Logger.log('getInventoryRecordBySku_: search target="%s"', target);
+  Logger.log('[getInventoryRecordBySku_] Search target="%s"', target);
 
   let firstMatch = null;
   let totalQty = 0;
@@ -846,7 +847,7 @@ function getInventoryRecordBySku_(inventorySheet, sku) {
 
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    const rowSkuRaw  = row[skuCol];
+    const rowSkuRaw = row[skuCol];
     const rowSkuNorm = normalizeSku(rowSkuRaw);
 
     if (!rowSkuNorm || rowSkuNorm !== target) {
@@ -866,18 +867,18 @@ function getInventoryRecordBySku_(inventorySheet, sku) {
 
     if (!firstMatch) {
       firstMatch = {
-        sku:      row[skuCol],
-        quantity: 0, // we’ll fill in after the loop
-        vendor:   vendorCol !== -1 ? row[vendorCol] : '',
-        name:     nameCol   !== -1 ? row[nameCol]   : '',
-        location: locCol    !== -1 ? row[locCol]    : '',
+        sku: row[skuCol],
+        quantity: 0, // we'll fill in after the loop
+        vendor: vendorCol !== -1 ? row[vendorCol] : '',
+        name: nameCol !== -1 ? row[nameCol] : '',
+        location: locCol !== -1 ? row[locCol] : '',
         rowIndex: i + 2
       };
     }
   }
 
   if (!firstMatch) {
-    Logger.log('getInventoryRecordBySku_: no match for "%s"', sku);
+    Logger.log('[getInventoryRecordBySku_] No match for "%s"', sku);
     return null;
   }
 
@@ -888,13 +889,14 @@ function getInventoryRecordBySku_(inventorySheet, sku) {
   }
   firstMatch.rowIndexes = rowIndexes;
 
-  Logger.log('getInventoryRecordBySku_: aggregated record: ' + JSON.stringify(firstMatch));
+  Logger.log('[getInventoryRecordBySku_] Aggregated record: ' + JSON.stringify(firstMatch));
   return firstMatch;
 }
 
-/******************************************************
- * COMPAT WRAPPER – quantity only
- ******************************************************/
+/**
+ * Compatibility wrapper – quantity only
+ * @deprecated Use getInventoryRecordBySku_ for full record
+ */
 function lookupInventoryBySKU(inventorySheet, sku) {
   const rec = getInventoryRecordBySku_(inventorySheet, sku);
   return rec ? rec.quantity : 0;
@@ -903,17 +905,19 @@ function lookupInventoryBySKU(inventorySheet, sku) {
 /******************************************************
  * INVENTORY LOOKUP
  ******************************************************/
+
 function handleInventoryLookup_(body) {
   const ss = SpreadsheetApp.getActive();
-  const inventorySheet = ss.getSheetByName(INVENTORY_SHEET_NAME);
+  const inventorySheet = ss.getSheetByName(SHEET_NAMES.INVENTORY);
+  
   if (!inventorySheet) {
     return jsonResponse_({ status: 'error', message: 'Inventory sheet not found' });
   }
 
-  const skuQuery   = (body.sku || '').toString().trim();
+  const skuQuery = (body.sku || '').toString().trim();
   const searchText = (body.search || '').toString().trim();
 
-  Logger.log('handleInventoryLookup_: sku="%s" search="%s"', skuQuery, searchText);
+  Logger.log('[handleInventoryLookup_] sku="%s" search="%s"', skuQuery, searchText);
 
   const values = inventorySheet.getDataRange().getValues();
   if (!values || values.length < 2) {
@@ -921,22 +925,22 @@ function handleInventoryLookup_(body) {
   }
 
   const header = values[0];
-  const rows   = values.slice(1);
+  const rows = values.slice(1);
 
-  const SKU_COL    = findColumnIndex_(header, h => h.includes('sku') || h.includes('part number'));
+  const SKU_COL = findColumnIndex_(header, h => h.includes('sku') || h.includes('part number'));
   const VENDOR_COL = findColumnIndex_(header, h => h.includes('vendor'));
-  const NAME_COL   = findColumnIndex_(header, h => h.includes('part name'));
-  const LOC_COL    = findColumnIndex_(header, h => h.includes('location'));
-  const QTY_COL    = findColumnIndex_(header, h => h.includes('qty') || h.includes('on-hand'));
+  const NAME_COL = findColumnIndex_(header, h => h.includes('part name'));
+  const LOC_COL = findColumnIndex_(header, h => h.includes('location'));
+  const QTY_COL = findColumnIndex_(header, h => h.includes('qty') || h.includes('on-hand'));
 
-  Logger.log('handleInventoryLookup_ header=' + JSON.stringify(header));
-  Logger.log('Columns: SKU=%s Vendor=%s Name=%s Loc=%s Qty=%s',
+  Logger.log('[handleInventoryLookup_] Header=' + JSON.stringify(header));
+  Logger.log('[handleInventoryLookup_] Columns: SKU=%s Vendor=%s Name=%s Loc=%s Qty=%s',
              SKU_COL, VENDOR_COL, NAME_COL, LOC_COL, QTY_COL);
 
   const matches = [];
 
   /******************************************************
-   * NEW: LOCATION LOOKUP (BIN-xxx, RACK-xxx)
+   * LOCATION LOOKUP (BIN-xxx, RACK-xxx)
    ******************************************************/
   const upperSearch = searchText.toUpperCase();
   const isLocationLookup =
@@ -944,32 +948,31 @@ function handleInventoryLookup_(body) {
     upperSearch.startsWith('RACK-');
 
   if (isLocationLookup && LOC_COL !== -1 && QTY_COL !== -1 && NAME_COL !== -1) {
-    Logger.log('handleInventoryLookup_: location lookup for "%s"', upperSearch);
+    Logger.log('[handleInventoryLookup_] Location lookup for "%s"', upperSearch);
 
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
       const locValRaw = (row[LOC_COL] || '').toString().trim();
-      const locVal    = locValRaw.toUpperCase();
+      const locVal = locValRaw.toUpperCase();
 
       if (locVal === upperSearch) {
         matches.push({
-          sku:       SKU_COL    !== -1 ? row[SKU_COL]    : '',
-          vendor:    VENDOR_COL !== -1 ? row[VENDOR_COL] : '',
-          name:      NAME_COL   !== -1 ? row[NAME_COL]   : '',
-          location:  locValRaw,
-          quantity:  QTY_COL    !== -1 ? row[QTY_COL]    : ''
+          sku: SKU_COL !== -1 ? row[SKU_COL] : '',
+          vendor: VENDOR_COL !== -1 ? row[VENDOR_COL] : '',
+          name: NAME_COL !== -1 ? row[NAME_COL] : '',
+          location: locValRaw,
+          quantity: QTY_COL !== -1 ? row[QTY_COL] : ''
         });
       }
     }
 
-    Logger.log('handleInventoryLookup_ location result: ' + JSON.stringify(matches));
+    Logger.log('[handleInventoryLookup_] Location result: ' + JSON.stringify(matches));
     return jsonResponse_({ status: 'ok', matches: matches });
   }
 
   /******************************************************
-   * EXISTING LOGIC: SKU EXACT LOOKUP
+   * SKU EXACT LOOKUP
    ******************************************************/
-  // Exact SKU match using shared logic
   if (skuQuery) {
     const rec = getInventoryRecordBySku_(inventorySheet, skuQuery);
     if (rec) {
@@ -984,13 +987,13 @@ function handleInventoryLookup_(body) {
   }
 
   /******************************************************
-   * EXISTING LOGIC: FUZZY SEARCH FALLBACK
+   * FUZZY SEARCH FALLBACK
    ******************************************************/
   const fallbackQuery = (searchText || skuQuery).toLowerCase();
   if (matches.length === 0 && fallbackQuery && SKU_COL !== -1 && NAME_COL !== -1 && QTY_COL !== -1) {
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
-      const rowSku  = (row[SKU_COL]  || '').toString().toLowerCase();
+      const rowSku = (row[SKU_COL] || '').toString().toLowerCase();
       const rowName = (row[NAME_COL] || '').toString().toLowerCase();
 
       if (rowSku.indexOf(fallbackQuery) !== -1 || rowName.indexOf(fallbackQuery) !== -1) {
@@ -1007,17 +1010,18 @@ function handleInventoryLookup_(body) {
     }
   }
 
-  Logger.log('handleInventoryLookup_ result: ' + JSON.stringify(matches));
+  Logger.log('[handleInventoryLookup_] Result: ' + JSON.stringify(matches));
   return jsonResponse_({ status: 'ok', matches });
 }
 
 /******************************************************
  * OPEN ORDERS
  ******************************************************/
+
 function handleOpenOrders_(body) {
   const ss = SpreadsheetApp.getActive();
-  const ordSheet = ss.getSheetByName(ORDERS_SHEET_NAME);
-  const reqSheet = ss.getSheetByName(PART_REQUESTS_SHEET_NAME);
+  const ordSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
+  const reqSheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
 
   if (!ordSheet) {
     return jsonResponse_({
@@ -1030,28 +1034,23 @@ function handleOpenOrders_(body) {
   const orders = [];
 
   if (ordValues && ordValues.length > 1) {
-    // Orders columns (0-based index):
-    // 0 Order ID, 1 Included Request IDs, 2 Vendor, 3 Part Name, 4 SKU,
-    // 5 Qty Ordered, 6 Final Unit Price, 7 Total Cost, 8 Order Date,
-    // 9 Shipping Method, 10 Tracking, 11 ETA, 12 Received Date,
-    // 13 Order Status, 14 Mentor Notes
-
     const rows = ordValues.slice(1);
+    
     for (let i = 0; i < rows.length; i++) {
       const row = rows[i];
 
-      const orderId   = (row[0] || '').toString().trim();
-      const vendor    = row[2] || '';
-      const partName  = row[3] || '';
-      const sku       = row[4] || '';
-      const qty       = row[5] || '';
-      const orderDate = row[8] || '';
-      const shipping  = row[9] || '';
-      const tracking  = row[10] || '';
-      const eta       = row[11] || '';
-      const received  = row[12];  // may be blank
-      const status    = (row[13] || '').toString().trim();
-      const reqIds    = row[1] || '';
+      const orderId = (row[ORDERS_COLS.ORDER_ID - 1] || '').toString().trim();
+      const vendor = row[ORDERS_COLS.VENDOR - 1] || '';
+      const partName = row[ORDERS_COLS.PART_NAME - 1] || '';
+      const sku = row[ORDERS_COLS.SKU - 1] || '';
+      const qty = row[ORDERS_COLS.QTY_ORDERED - 1] || '';
+      const orderDate = row[ORDERS_COLS.ORDER_DATE - 1] || '';
+      const shipping = row[ORDERS_COLS.SHIPPING_METHOD - 1] || '';
+      const tracking = row[ORDERS_COLS.TRACKING - 1] || '';
+      const eta = row[ORDERS_COLS.ETA - 1] || '';
+      const received = row[ORDERS_COLS.RECEIVED_DATE - 1];
+      const status = (row[ORDERS_COLS.ORDER_STATUS - 1] || '').toString().trim();
+      const reqIds = row[ORDERS_COLS.INCLUDED_REQUEST_IDS - 1] || '';
 
       // "Not received" definition:
       // - No Received Date
@@ -1077,45 +1076,42 @@ function handleOpenOrders_(body) {
     }
   }
 
-  // ---- Also collect "Denied" requests from Part Requests sheet ----
+  // ---- Collect "Denied" requests from Part Requests sheet ----
   const denied = [];
   if (reqSheet) {
     const reqValues = reqSheet.getDataRange().getValues();
+    
     if (reqValues && reqValues.length > 1) {
-      // Part Requests columns (0-based):
-      // 0 ID, 1 Timestamp, 2 Requester, 3 Subsystem, 4 Part Name,
-      // 5 SKU, 6 Link, 7 Qty, 8 Priority, 9 Needed By,
-      // 10 Inventory, 11 Vendor Stock, 12 Est Unit Price,
-      // 13 Total Est Cost, 14 Max Budget, 15 Budget Status,
-      // 16 Request Status, 17 Mentor Notes, 18 Expedited Shipping
-
       const rRows = reqValues.slice(1);
+      
       for (let i = 0; i < rRows.length; i++) {
         const row = rRows[i];
-        const id      = (row[0] || '').toString().trim();
-        const status  = (row[16] || '').toString().trim().toLowerCase();
+        const id = (row[PART_REQUESTS_COLS.ID - 1] || '').toString().trim();
+        const status = (row[PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString().trim().toLowerCase();
 
         if (!id) continue;
+        
         if (status === 'denied') {
           denied.push({
-            id: row[0],
-            timestamp: row[1],
-            requester: row[2],
-            subsystem: row[3],
-            partName: row[4],
-            sku: row[5],
-            link: row[6],
-            qty: row[7],
-            priority: row[8],
-            neededBy: row[9],
-            mentorNotes: row[17] || ''
+            id: row[PART_REQUESTS_COLS.ID - 1],
+            timestamp: row[PART_REQUESTS_COLS.TIMESTAMP - 1],
+            requester: row[PART_REQUESTS_COLS.REQUESTER - 1],
+            subsystem: row[PART_REQUESTS_COLS.SUBSYSTEM - 1],
+            partName: row[PART_REQUESTS_COLS.PART_NAME - 1],
+            sku: row[PART_REQUESTS_COLS.SKU - 1],
+            link: row[PART_REQUESTS_COLS.PART_LINK - 1],
+            qty: row[PART_REQUESTS_COLS.QUANTITY - 1],
+            priority: row[PART_REQUESTS_COLS.PRIORITY - 1],
+            neededBy: row[PART_REQUESTS_COLS.NEEDED_BY - 1],
+            mentorNotes: row[PART_REQUESTS_COLS.MENTOR_NOTES - 1] || ''
           });
         }
       }
     }
   }
 
-  Logger.log('handleOpenOrders_ found ' + orders.length + ' open orders and ' + denied.length + ' denied requests');
+  Logger.log('[handleOpenOrders_] Found %s open orders and %s denied requests', 
+             orders.length, denied.length);
 
   return jsonResponse_({
     status: 'ok',
@@ -1127,9 +1123,10 @@ function handleOpenOrders_(body) {
 /******************************************************
  * APPROVAL WORKFLOW
  ******************************************************/
+
 function approveSelectedRequest() {
   const ss = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(PART_REQUESTS_SHEET_NAME);
+  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
   const activeRange = sheet.getActiveRange();
 
   if (!activeRange) {
@@ -1147,82 +1144,80 @@ function approveSelectedRequest() {
   SpreadsheetApp.getUi().alert('Request on row ' + row + ' approved and added to Orders.');
 }
 
-/******************************************************
- * APPROVE REQUEST
- ******************************************************/
+/**
+ * Approves a request and creates an order
+ * @param {number} requestRow - Row number of the request to approve
+ */
 function approveRequest(requestRow) {
   const ss = SpreadsheetApp.getActive();
-  const requestSheet = ss.getSheetByName(PART_REQUESTS_SHEET_NAME);
-  const orderSheet   = ss.getSheetByName(ORDERS_SHEET_NAME);
-
-  const requestID    = requestSheet.getRange(requestRow, 1).getValue();
-  const partName     = requestSheet.getRange(requestRow, 5).getValue();
-  const sku          = requestSheet.getRange(requestRow, 6).getValue();
-  const link         = requestSheet.getRange(requestRow, 7).getValue();
-  const qty          = requestSheet.getRange(requestRow, 8).getValue();
-  const estUnit      = requestSheet.getRange(requestRow, 13).getValue();
-  const totalEst     = requestSheet.getRange(requestRow, 14).getValue();
-  const maxBudget    = requestSheet.getRange(requestRow, 15).getValue();
-  const budgetStatus = requestSheet.getRange(requestRow, 16).getValue();
-  const shipping     = requestSheet.getRange(requestRow, 19).getValue() || 'Standard';
-
+  const requestSheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  const orderSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
+  
+  // Read request data using column constants
+  const requestID = requestSheet.getRange(requestRow, PART_REQUESTS_COLS.ID).getValue();
+  const partName = requestSheet.getRange(requestRow, PART_REQUESTS_COLS.PART_NAME).getValue();
+  const sku = requestSheet.getRange(requestRow, PART_REQUESTS_COLS.SKU).getValue();
+  const link = requestSheet.getRange(requestRow, PART_REQUESTS_COLS.PART_LINK).getValue();
+  const qty = requestSheet.getRange(requestRow, PART_REQUESTS_COLS.QUANTITY).getValue();
+  const estUnit = requestSheet.getRange(requestRow, PART_REQUESTS_COLS.EST_UNIT_PRICE).getValue();
+  const totalEst = requestSheet.getRange(requestRow, PART_REQUESTS_COLS.TOTAL_EST_COST).getValue();
+  const budgetStatus = requestSheet.getRange(requestRow, PART_REQUESTS_COLS.BUDGET_STATUS).getValue();
+  const shipping = requestSheet.getRange(requestRow, PART_REQUESTS_COLS.EXPEDITED_SHIPPING).getValue() || 'Standard';
+  
   if (!requestID) {
     throw new Error('No Request ID found in row ' + requestRow);
   }
-
+  
   if (budgetStatus && budgetStatus.toString().startsWith('Over Budget')) {
     throw new Error('Request ' + requestID + ' exceeds budget. Fix or override before approving.');
   }
-
+  
   const orderID = 'ORD-' + Utilities.getUuid().split('-')[0];
-  const vendor  = extractVendorFromURL(link);
-
-  orderSheet.appendRow([
-    orderID,
-    requestID,
-    vendor,
-    partName,
-    sku,
-    qty,
-    estUnit,
-    totalEst,
-    new Date(),
-    shipping,
-    '',
-    '',
-    '',
-    'Ordered',
-    ''
-  ]);
-
-  requestSheet.getRange(requestRow, 17).setValue('Ordered');
+  const vendor = extractVendorFromURL(link);
+  
+  // Append to Orders sheet using column constants
+  const orderData = new Array(ORDERS_COLS.MENTOR_NOTES).fill('');
+  orderData[ORDERS_COLS.ORDER_ID - 1] = orderID;
+  orderData[ORDERS_COLS.INCLUDED_REQUEST_IDS - 1] = requestID;
+  orderData[ORDERS_COLS.VENDOR - 1] = vendor;
+  orderData[ORDERS_COLS.PART_NAME - 1] = partName;
+  orderData[ORDERS_COLS.SKU - 1] = sku;
+  orderData[ORDERS_COLS.QTY_ORDERED - 1] = qty;
+  orderData[ORDERS_COLS.FINAL_UNIT_PRICE - 1] = estUnit;
+  orderData[ORDERS_COLS.TOTAL_COST - 1] = totalEst;
+  orderData[ORDERS_COLS.ORDER_DATE - 1] = new Date();
+  orderData[ORDERS_COLS.SHIPPING_METHOD - 1] = shipping;
+  orderData[ORDERS_COLS.ORDER_STATUS - 1] = 'Ordered';
+  
+  orderSheet.appendRow(orderData);
+  
+  // Update request status
+  requestSheet.getRange(requestRow, PART_REQUESTS_COLS.REQUEST_STATUS).setValue('Ordered');
 }
 
-// Vendor extraction helper
+/******************************************************
+ * VENDOR EXTRACTION HELPER
+ ******************************************************/
+
 function extractVendorFromURL(url) {
   if (!url) return 'Other Vendor';
+  
   const lower = url.toLowerCase();
-  if (lower.includes('revrobotics'))      return 'REV Robotics';
-  if (lower.includes('andymark'))         return 'AndyMark';
-  if (lower.includes('mcmaster'))         return 'McMaster-Carr';
-  if (lower.includes('vexrobotics'))      return 'VEX Robotics';
-  if (lower.includes('digikey'))          return 'DigiKey';
-  if (lower.includes('amazon'))           return 'Amazon';
-  if (lower.includes('wcproducts'))       return 'West Coast Products';
-  if (lower.includes('ctr-electronics'))  return 'CTR Electronics';
-  if (lower.includes('reduxrobotics'))    return 'ReduxRobotics';
-  if (lower.includes('thethirftybot'))    return 'ThriftyBot';
-  if (lower.includes('homedepot'))        return 'Home Depot';
-  if (lower.includes('powerwerx'))        return 'PowerWorx';
-  if (lower.includes('sendcutsend'))      return 'SendCutSend';
-  if (lower.includes('foamorder'))        return 'Foam Order';
+  
+  if (lower.includes('revrobotics')) return 'REV Robotics';
+  if (lower.includes('andymark')) return 'AndyMark';
+  if (lower.includes('mcmaster')) return 'McMaster-Carr';
+  if (lower.includes('vexrobotics')) return 'VEX Robotics';
+  if (lower.includes('digikey')) return 'DigiKey';
+  if (lower.includes('amazon')) return 'Amazon';
+  if (lower.includes('wcproducts')) return 'West Coast Products';
+  if (lower.includes('ctr-electronics')) return 'CTR Electronics';
+  if (lower.includes('reduxrobotics')) return 'ReduxRobotics';
+  if (lower.includes('thethirftybot')) return 'ThriftyBot';
+  if (lower.includes('homedepot')) return 'Home Depot';
+  if (lower.includes('powerwerx')) return 'PowerWorx';
+  if (lower.includes('sendcutsend')) return 'SendCutSend';
+  if (lower.includes('foamorder')) return 'Foam Order';
+  
   return 'Other Vendor';
-}
-
-// test function
-function testSkuLookup_am3583() {
-  const ss = SpreadsheetApp.getActive();
-  const inventorySheet = ss.getSheetByName(INVENTORY_SHEET_NAME);
-  const rec = getInventoryRecordBySku_(inventorySheet, 'am-3583');
-  Logger.log('testSkuLookup_am3583 => ' + JSON.stringify(rec));
 }
