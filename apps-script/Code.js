@@ -198,14 +198,30 @@ function handleDiscordRequest_(body) {
 
     Logger.log('[handleDiscordRequest_] Request data: ' + JSON.stringify(requestData));
 
-    const { requestID, row } = createPartRequest_(requestData);
-    
-    Logger.log('[handleDiscordRequest_] Created request: ' + requestID + ' at row ' + row);
+const { requestID, row } = createPartRequest_(requestData);
 
-    return jsonResponse_({ 
-      status: 'ok', 
-      requestID: requestID 
-    });
+Logger.log('[handleDiscordRequest_] Created request: ' + requestID + ' at row ' + row);
+
+// Send Discord notification
+sendProcurementNotification_({
+  requestID: requestID,
+  timestamp: requestData.timestamp,
+  requester: requestData.requester,
+  subsystem: requestData.subsystem,
+  partName: '',   // AI fills this later
+  sku: '',        // AI fills this later
+  link: requestData.partLink,
+  quantity: requestData.quantity,
+  priority: requestData.priority,
+  neededBy: requestData.neededBy,
+  maxBudget: requestData.maxBudget,
+  notes: requestData.notes
+});
+
+return jsonResponse_({ 
+  status: 'ok', 
+  requestID: requestID 
+});
 
   } catch (err) {
     Logger.log('[handleDiscordRequest_] Error: ' + err);
@@ -253,6 +269,81 @@ function createPartRequest_(data) {
   Logger.log('[createPartRequest_] Request created successfully');
   
   return { requestID: requestID, row: nextRow };
+}
+
+/******************************************************
+ * DISCORD WEBHOOK NOTIFICATION
+ ******************************************************/
+
+function sendProcurementNotification_(request) {
+  const props = PropertiesService.getScriptProperties();
+  const webhookUrl = props.getProperty('DISCORD_PROCUREMENT_WEBHOOK_URL');
+  
+  if (!webhookUrl) {
+    Logger.log('[sendProcurementNotification_] No webhook URL configured; skipping.');
+    return;
+  }
+
+  const roleId = props.getProperty('DISCORD_PROCUREMENT_ROLE_ID');
+  const rolePing = roleId ? `<@&${roleId}>` : '';
+
+  const {
+    requestID,
+    timestamp,
+    requester,
+    subsystem,
+    partName,
+    sku,
+    link,
+    quantity,
+    priority,
+    neededBy,
+    maxBudget,
+    notes
+  } = request;
+
+  const content = rolePing
+    ? `${rolePing} New part request submitted: **${requestID || ''}**`
+    : `New part request submitted: **${requestID || ''}**`;
+
+  const embed = {
+    title: 'New Part Request',
+    color: priority === 'Critical' ? 0xFF0000 : priority === 'High' ? 0xFFA500 : 0x00FF00,
+    fields: [
+      { name: 'Request ID', value: requestID || 'Unknown', inline: true },
+      { name: 'Requester', value: requester || 'Unknown', inline: true },
+      { name: 'Subsystem', value: subsystem || '—', inline: true },
+      { name: 'Priority', value: priority || 'Medium', inline: true },
+      { name: 'Quantity', value: String(quantity || ''), inline: true },
+      { name: 'Max Budget', value: maxBudget ? `$${maxBudget}` : '—', inline: true },
+      { name: 'Part Name', value: partName || '(AI enrichment pending)', inline: false },
+      { name: 'SKU', value: sku || '(AI enrichment pending)', inline: true },
+      { name: 'Link', value: link || '—', inline: false }
+    ],
+    timestamp: (timestamp instanceof Date ? timestamp : new Date()).toISOString()
+  };
+
+  if (notes) {
+    embed.fields.push({ name: 'Notes', value: notes, inline: false });
+  }
+
+  const payload = {
+    content: content,
+    embeds: [embed]
+  };
+
+  try {
+    const resp = UrlFetchApp.fetch(webhookUrl, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+
+    Logger.log('[sendProcurementNotification_] Response: ' + resp.getResponseCode() + ' ' + resp.getContentText());
+  } catch (err) {
+    Logger.log('[sendProcurementNotification_] Error: ' + err);
+  }
 }
 
 /******************************************************
