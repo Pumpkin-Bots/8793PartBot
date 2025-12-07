@@ -5,11 +5,13 @@ yarn.lock
 pnpm-lock.yaml
 
 # Apps Script / clasp
-apps-script/.clasprc.json
+apps-script/.clasp.json
+apps-script/appsscript.json
 .clasprc.json
 
 # Environment / secrets
 .env
+*.log
 .env.local
 .env.*.local
 
