@@ -253,40 +253,65 @@ async function handleOpenOrders(interaction) {
     if (orders.length === 0) {
       lines.push('No open orders.\n');
     } else {
-      const shown = orders.slice(0, 15);
+      // Show fewer orders to stay under 2000 char limit
+      const shown = orders.slice(0, 10); // Reduced from 15
       lines.push(`Total: ${orders.length}\n`);
 
       for (const o of shown) {
+        // Simplified format to save characters
         lines.push(
           `• **${o.orderId}** — ${o.vendor || 'Unknown'}`,
-          `  Part: ${o.partName || '(no name)'}`,
-          `  SKU: ${o.sku || '(none)'} | Qty: ${o.qty || 'N/A'}`,
-          `  Status: ${o.status || 'Unknown'}`,
-          `  Ordered: ${formatDate(o.orderDate)} | ETA: ${formatEta(o.eta)}`,
-          `  Tracking: ${o.tracking || '—'}\n`
+          `  ${o.partName || '(no name)'}`,
+          `  Status: ${o.status || 'Unknown'}\n`
         );
+      }
+      
+      if (orders.length > 10) {
+        lines.push(`...and ${orders.length - 10} more orders\n`);
       }
     }
 
     if (denied.length > 0) {
-      const shownDenied = denied.slice(0, 15);
+      const shownDenied = denied.slice(0, 5); // Reduced from 15
       lines.push('⚠️ **Denied Requests**');
       lines.push(`Total: ${denied.length}\n`);
 
       for (const r of shownDenied) {
         lines.push(
           `• **${r.id}** — ${r.partName || '(no name)'}`,
-          `  Requester: ${r.requester || 'Unknown'}`,
-          `  Notes: ${r.mentorNotes || '—'}\n`
+          `  Requester: ${r.requester || 'Unknown'}\n`
         );
+      }
+      
+      if (denied.length > 5) {
+        lines.push(`...and ${denied.length - 5} more denied\n`);
       }
     }
 
-    return interaction.editReply(lines.join('\n'));
+    const message = lines.join('\n');
+    
+    // Check if message is too long (Discord limit is 2000)
+    if (message.length > 1950) {
+      // Fallback: Just show counts
+      return interaction.editReply(
+        `📦 **Open Orders Summary**\n\n` +
+        `Open orders: ${orders.length}\n` +
+        `Denied requests: ${denied.length}\n\n` +
+        `Too many items to display. Check the spreadsheet for details.`
+      );
+    }
+
+    return interaction.editReply(message);
 
   } catch (err) {
     console.error('[handleOpenOrders] Error:', err.message);
-    return interaction.editReply('❌ Failed to contact Google Sheets');
+    console.error('[handleOpenOrders] Stack:', err.stack);
+    
+    // More detailed error for debugging
+    return interaction.editReply(
+      `❌ Error: ${err.message}\n\n` +
+      `Check bot console for details.`
+    );
   }
 }
 
