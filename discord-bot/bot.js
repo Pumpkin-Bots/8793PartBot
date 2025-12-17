@@ -229,7 +229,21 @@ async function handleRequestPart(interaction) {
 }
 
 async function handleOpenOrders(interaction) {
+  console.log('[handleOpenOrders] ===== COMMAND CALLED =====');
   await interaction.deferReply({ ephemeral: true });
+  console.log('[handleOpenOrders] Deferred reply');
+
+  try {
+    const payload = { action: 'openOrders' };
+    console.log('[handleOpenOrders] Sending payload:', payload);
+    console.log('[handleOpenOrders] URL:', APPS_SCRIPT_URL);
+    
+    const response = await axios.post(APPS_SCRIPT_URL, payload);
+    console.log('[handleOpenOrders] Got response status:', response.status);
+    console.log('[handleOpenOrders] Response data:', JSON.stringify(response.data).substring(0, 200));
+    
+    const data = response.data;
+    // ... rest of function
 
   try {
     const payload = { action: 'openOrders' };
