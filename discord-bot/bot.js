@@ -227,7 +227,6 @@ async function handleRequestPart(interaction) {
     return interaction.editReply('❌ Failed to contact Google Sheets');
   }
 }
-
 async function handleOpenOrders(interaction) {
   console.log('[handleOpenOrders] ===== COMMAND CALLED =====');
   await interaction.deferReply({ ephemeral: true });
@@ -242,12 +241,6 @@ async function handleOpenOrders(interaction) {
     console.log('[handleOpenOrders] Got response status:', response.status);
     console.log('[handleOpenOrders] Response data:', JSON.stringify(response.data).substring(0, 200));
     
-    const data = response.data;
-    // ... rest of function
-
-  try {
-    const payload = { action: 'openOrders' };
-    const response = await axios.post(APPS_SCRIPT_URL, payload);
     const data = response.data;
 
     if (data.status !== 'ok') {
@@ -267,12 +260,10 @@ async function handleOpenOrders(interaction) {
     if (orders.length === 0) {
       lines.push('No open orders.\n');
     } else {
-      // Show fewer orders to stay under 2000 char limit
-      const shown = orders.slice(0, 10); // Reduced from 15
+      const shown = orders.slice(0, 10);
       lines.push(`Total: ${orders.length}\n`);
 
       for (const o of shown) {
-        // Simplified format to save characters
         lines.push(
           `• **${o.orderId}** — ${o.vendor || 'Unknown'}`,
           `  ${o.partName || '(no name)'}`,
@@ -286,7 +277,7 @@ async function handleOpenOrders(interaction) {
     }
 
     if (denied.length > 0) {
-      const shownDenied = denied.slice(0, 5); // Reduced from 15
+      const shownDenied = denied.slice(0, 5);
       lines.push('⚠️ **Denied Requests**');
       lines.push(`Total: ${denied.length}\n`);
 
@@ -304,9 +295,7 @@ async function handleOpenOrders(interaction) {
 
     const message = lines.join('\n');
     
-    // Check if message is too long (Discord limit is 2000)
     if (message.length > 1950) {
-      // Fallback: Just show counts
       return interaction.editReply(
         `📦 **Open Orders Summary**\n\n` +
         `Open orders: ${orders.length}\n` +
@@ -321,154 +310,9 @@ async function handleOpenOrders(interaction) {
     console.error('[handleOpenOrders] Error:', err.message);
     console.error('[handleOpenOrders] Stack:', err.stack);
     
-    // More detailed error for debugging
     return interaction.editReply(
       `❌ Error: ${err.message}\n\n` +
       `Check bot console for details.`
     );
   }
 }
-
-async function handleOrderStatus(interaction) {
-  const requestId = (interaction.options.getString('requestid') || '').trim();
-  const orderId = (interaction.options.getString('orderid') || '').trim();
-
-  if (!requestId && !orderId) {
-    return interaction.reply({
-      content: '⚠️ Provide either **requestid** or **orderid**',
-      ephemeral: true
-    });
-  }
-
-  await interaction.deferReply({ ephemeral: true });
-
-  try {
-    const payload = {
-      action: 'orderStatus',
-      requestId,
-      orderId
-    };
-
-    const response = await axios.post(APPS_SCRIPT_URL, payload);
-    const data = response.data;
-
-    if (data.status !== 'ok') {
-      return interaction.editReply(`❌ Error: ${data.message || 'Unknown error'}`);
-    }
-
-    if (requestId) {
-      const r = data.request;
-      if (!r) return interaction.editReply(`🔍 No request found for \`${requestId}\``);
-
-      const lines = [
-        `📄 **Request Status – ${r.id}**\n`,
-        `**Status:** ${r.requestStatus || 'Unknown'}`,
-        `**Subsystem:** ${r.subsystem || 'N/A'}`,
-        `**Part:** ${r.partName || '(no name)'}`,
-        `**Qty:** ${r.qty || 'N/A'}`,
-        `**Priority:** ${r.priority || 'N/A'}`
-      ];
-
-      const orders = data.orders || [];
-      if (orders.length > 0) {
-        lines.push('\n📦 **Linked Orders:**');
-        for (const o of orders) {
-          lines.push(
-            `• **${o.orderId}** — ${o.status || 'Unknown'}, ` +
-            `ETA: ${formatEta(o.eta)}`
-          );
-        }
-      }
-
-      return interaction.editReply(lines.join('\n'));
-    }
-
-    if (orderId) {
-      const o = data.order;
-      if (!o) return interaction.editReply(`🔍 No order found for \`${orderId}\``);
-
-      const lines = [
-        `📦 **Order Status – ${o.orderId}**\n`,
-        `**Status:** ${o.status || 'Unknown'}`,
-        `**Vendor:** ${o.vendor || 'N/A'}`,
-        `**Part:** ${o.partName || '(no name)'}`,
-        `**Qty:** ${o.qty || 'N/A'}`,
-        `**Ordered:** ${formatDate(o.orderDate)}`,
-        `**ETA:** ${formatEta(o.eta)}`,
-        `**Tracking:** ${o.tracking || '—'}`
-      ];
-
-      return interaction.editReply(lines.join('\n'));
-    }
-
-  } catch (err) {
-    console.error('[handleOrderStatus] Error:', err.message);
-    return interaction.editReply('❌ Failed to contact Google Sheets');
-  }
-}
-
-async function handleInventory(interaction) {
-  const sku = (interaction.options.getString('sku') || '').trim();
-  const search = (interaction.options.getString('search') || '').trim();
-
-  if (!sku && !search) {
-    return interaction.reply({
-      content: '⚠️ Provide either **sku** or **search**',
-      ephemeral: true
-    });
-  }
-
-  await interaction.deferReply({ ephemeral: true });
-
-  try {
-    const payload = {
-      action: 'inventory',
-      sku: sku,
-      search: search
-    };
-
-    const response = await axios.post(APPS_SCRIPT_URL, payload);
-    const data = response.data;
-
-    if (data.status !== 'ok') {
-      return interaction.editReply(`❌ Error: ${data.message || 'Unknown error'}`);
-    }
-
-    const matches = data.matches || [];
-
-    if (matches.length === 0) {
-      return interaction.editReply(`🔍 No inventory found for \`${sku || search}\``);
-    }
-
-    if (matches.length === 1) {
-      const m = matches[0];
-      const lines = [
-        '📦 **Inventory Match**\n',
-        `**SKU:** ${m.sku}`,
-        `**Name:** ${m.name}`,
-        `**Vendor:** ${m.vendor}`,
-        `**Location:** ${m.location}`,
-        `**Qty On-Hand:** ${m.quantity}`
-      ];
-      return interaction.editReply(lines.join('\n'));
-    }
-
-    const lines = [`📦 **${matches.length} matches found:**`];
-    for (const m of matches.slice(0, 10)) {
-      lines.push(`• \`${m.sku}\` — ${m.name} (Qty: ${m.quantity}, Loc: ${m.location})`);
-    }
-
-    return interaction.editReply(lines.join('\n'));
-
-  } catch (err) {
-    console.error('[handleInventory] Error:', err.message);
-    return interaction.editReply('❌ Failed to contact Google Sheets');
-  }
-}
-
-registerCommands()
-  .then(() => client.login(TOKEN))
-  .catch(err => {
-    console.error('[Bot] ❌ Failed to start:', err);
-    process.exit(1);
-  });
