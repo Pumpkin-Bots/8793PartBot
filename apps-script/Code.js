@@ -694,6 +694,8 @@ function handleInventoryLookup_(body) {
   const skuQuery = (body.sku || '').toString().trim();
   const searchText = (body.search || '').toString().trim();
 
+  Logger.log(`[handleInventoryLookup_] SKU: "${skuQuery}", Search: "${searchText}"`);
+
   try {
     const values = inventorySheet.getDataRange().getValues();
     if (!values || values.length < 2) {
@@ -703,16 +705,22 @@ function handleInventoryLookup_(body) {
     const header = values[0];
     const rows = values.slice(1);
 
+    Logger.log(`[handleInventoryLookup_] Headers: ${JSON.stringify(header)}`);
+
     const SKU_COL = findColumnIndex_(header, h => h.includes('sku') || h.includes('part number'));
     const VENDOR_COL = findColumnIndex_(header, h => h.includes('vendor'));
     const NAME_COL = findColumnIndex_(header, h => h.includes('part name'));
     const LOC_COL = findColumnIndex_(header, h => h.includes('location'));
     const QTY_COL = findColumnIndex_(header, h => h.includes('qty') || h.includes('on-hand'));
 
+    Logger.log(`[handleInventoryLookup_] Column indices - SKU:${SKU_COL}, VENDOR:${VENDOR_COL}, NAME:${NAME_COL}, LOC:${LOC_COL}, QTY:${QTY_COL}`);
+
     const matches = [];
 
+    // Exact SKU match
     if (skuQuery && SKU_COL !== -1) {
       const targetSku = normalizeSku(skuQuery);
+      Logger.log(`[handleInventoryLookup_] Searching for exact SKU: "${targetSku}"`);
 
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
@@ -730,14 +738,25 @@ function handleInventoryLookup_(body) {
       }
     }
 
+    // Fuzzy search (SKU, Name, OR Location)
     const fallbackQuery = (searchText || skuQuery).toLowerCase();
     if (matches.length === 0 && fallbackQuery && SKU_COL !== -1 && NAME_COL !== -1 && QTY_COL !== -1) {
+      Logger.log(`[handleInventoryLookup_] Doing fuzzy search for: "${fallbackQuery}"`);
+      
       for (let i = 0; i < rows.length; i++) {
         const row = rows[i];
         const rowSku = (row[SKU_COL] || '').toString().toLowerCase();
         const rowName = (row[NAME_COL] || '').toString().toLowerCase();
+        const rowLocation = LOC_COL !== -1 ? (row[LOC_COL] || '').toString().toLowerCase() : '';
 
-        if (rowSku.indexOf(fallbackQuery) !== -1 || rowName.indexOf(fallbackQuery) !== -1) {
+        Logger.log(`[handleInventoryLookup_] Row ${i}: SKU="${rowSku}", Name="${rowName}", Loc="${rowLocation}"`);
+
+        if (rowSku.indexOf(fallbackQuery) !== -1 || 
+            rowName.indexOf(fallbackQuery) !== -1 ||
+            rowLocation.indexOf(fallbackQuery) !== -1) {
+          
+          Logger.log(`[handleInventoryLookup_] ✓ MATCH found at row ${i}`);
+          
           matches.push({
             sku: row[SKU_COL],
             vendor: VENDOR_COL !== -1 ? row[VENDOR_COL] : '',
@@ -750,6 +769,8 @@ function handleInventoryLookup_(body) {
         if (matches.length >= 10) break;
       }
     }
+
+    Logger.log(`[handleInventoryLookup_] Found ${matches.length} matches`);
 
     return jsonResponse_({ status: 'ok', matches: matches });
 
