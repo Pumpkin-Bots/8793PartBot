@@ -3,6 +3,7 @@
 ## Overview
 8793PartBot is an automation system built for **FRC Team 8793 – Pumpkin Bots** to streamline:
 - Part requests from students via Discord slash commands
+- **User-specified SKU override** for multi-variant product pages (NEW!)
 - Automatic SKU/name extraction via AI (Google Gemini 2.5 Flash)
 - Real-time inventory lookup
 - Student self-service request cancellation
@@ -16,10 +17,33 @@ It replaces DM chaos, ad‑hoc spreadsheets, and manual vendor lookups with a st
 
 ## Features
 
+### 🎯 User SKU Override (NEW!)
+Students can now specify exact SKUs when requesting parts from multi-variant product pages:
+```
+/requestpart subsystem:Drive link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
+```
+
+**Why this matters:**
+- Product pages like WCP ball bearings have multiple SKUs (WCP-0783, WCP-0784, WCP-0785, etc.)
+- AI might guess the wrong variant based on notes alone
+- User-specified SKU **overrides AI detection** and guarantees the correct part
+- Still optional - AI enrichment works normally if SKU not provided
+
+**Example use case:**
+```
+Without SKU field:
+/requestpart subsystem:Drive link:https://wcproducts.com/products/ball-bearings qty:4 notes:"1/2 inch flanged"
+→ AI might extract WCP-0783 (wrong variant) ❌
+
+With SKU field:
+/requestpart subsystem:Drive link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
+→ Guaranteed WCP-0785 (correct variant) ✅
+```
+
 ### 🔧 AI-Powered Part Enrichment (Gemini 2.5 Flash)
 Automatically extracts from a vendor URL:
 - Part name
-- SKU / product code
+- SKU / product code (unless user-specified)
 - Estimated price
 
 **Supported vendors:**
@@ -39,21 +63,26 @@ Automatically extracts from a vendor URL:
 - **McMaster-Carr:** Extracts SKU from URL pattern
 - **Other vendors:** Intelligent pattern matching
 
+**Smart SKU handling:**
+- If user provides SKU → AI only enriches Part Name and Price
+- If user omits SKU → AI enriches Part Name, SKU, and Price
+- User SKU always takes precedence over AI detection
+
 ### 💬 Discord Slash Commands
 Students request parts using intuitive slash commands:
 ```
-/requestpart subsystem:Drive link:<URL> qty:2 priority:High notes:"For shooter prototype"
+/requestpart subsystem:Drive link:<URL> sku:WCP-0785 qty:2 priority:High notes:"For shooter prototype"
 ```
 
 **All commands:**
-- `/requestpart` - Submit a new part request
-- `/cancelrequest` - Cancel your own request (**NEW!**)
+- `/requestpart` - Submit a new part request (now with optional `sku` field!)
+- `/cancelrequest` - Cancel your own request
 - `/inventory` - Search inventory by SKU or keyword
 - `/openorders` - View all pending orders and denied requests
 - `/orderstatus` - Check status of a specific request or order
 
-### 🚫 Request Cancellation (NEW!)
-Students can now cancel their own requests:
+### 🚫 Request Cancellation
+Students can cancel their own requests:
 ```
 /cancelrequest requestid:REQ-12345678 reason:No longer needed
 ```
@@ -90,15 +119,18 @@ Supports:
 - Location-based lookup (BIN-xxx, RACK-xxx)
 
 ### 🛠 Automated Workflow
-1. Student submits `/requestpart` in Discord
+1. Student submits `/requestpart` in Discord (optionally with specific SKU)
 2. Apps Script creates request in Google Sheets
-3. **AI enrichment (Gemini)** extracts part details from URL
-4. System checks inventory for existing stock
-5. Mentor reviews and approves in Google Sheets
-6. **Student can cancel** using `/cancelrequest` (if not yet ordered)
-7. Approved requests automatically moved to Orders sheet
-8. Order status tracked until received
-9. Denied requests flagged in `/openorders` for visibility
+3. **User-provided SKU written immediately** (if specified)
+4. **AI enrichment (Gemini)** extracts part details from URL
+   - If user provided SKU → AI only fills Part Name and Price
+   - If no user SKU → AI fills Part Name, SKU, and Price
+5. System checks inventory for existing stock
+6. Mentor reviews and approves in Google Sheets
+7. **Student can cancel** using `/cancelrequest` (if not yet ordered)
+8. Approved requests automatically moved to Orders sheet
+9. Order status tracked until received
+10. Denied requests flagged in `/openorders` for visibility
 
 **Status workflow:**
 - **📥 Submitted** → Initial request state
@@ -117,23 +149,27 @@ Supports:
 Discord Slash Commands
         ↓
 Node.js Discord Bot (bot.js)
-  - Command handling (/requestpart, /cancelrequest, etc.)
+  - Command handling (/requestpart with SKU field, /cancelrequest, etc.)
   - User interaction
   - HTTP requests to Apps Script
+  - SKU parameter extraction and validation
         ↓
 Google Apps Script Web App (Code.gs)
   - Request routing (doPost)
   - Database operations
+  - User SKU handling (priority over AI)
   - Gemini API integration
   - Security checks (cancellation permissions)
         ↓
 Google Sheets (Database)
-  - Part Requests (pending items)
+  - Part Requests (pending items with user/AI SKUs)
   - Orders (approved/ordered items)
   - Inventory (on-hand stock)
         ↓
 Google Gemini API (gemini-2.5-flash)
-  - Part name/SKU extraction from URLs
+  - Part name extraction from URLs
+  - SKU extraction (only if user didn't specify)
+  - Price extraction
   - Intelligent fallbacks for Amazon/McMaster
 ```
 
@@ -144,7 +180,7 @@ Google Gemini API (gemini-2.5-flash)
 8793PartBot/
 │
 ├── discord-bot/
-│   ├── bot.js                    # Main Discord bot (refactored)
+│   ├── bot.js                    # Main Discord bot (with SKU field support)
 │   ├── shared-constants.js       # Shared API constants
 │   ├── package.json
 │   ├── package-lock.json
@@ -152,338 +188,13 @@ Google Gemini API (gemini-2.5-flash)
 │   └── .env.example              # Template for .env
 │
 ├── apps-script/
-│   ├── Code.gs                   # Main Apps Script (complete implementation)
+│   ├── Code.gs                   # Main Apps Script (with user SKU override)
 │   ├── SharedConstants.gs        # Shared constants (optional)
 │   └── appsscript.json           # Apps Script manifest
 │
 ├── LICENSE
 └── README.md                     # This file
 ```
-
----
-
-## Setup Instructions
-
-### Prerequisites
-- Google Account (for Google Sheets and Apps Script)
-- Discord Developer Account
-- Google Gemini API Key (free tier available at https://aistudio.google.com/apikey)
-- Google Cloud VM or server (for hosting the bot)
-
----
-
-### 1. Google Sheets Setup
-
-#### Create Spreadsheet
-1. Create a new Google Sheet named "8793 FullInventory and PartPurchasing"
-2. Create three tabs with exact names:
-   - `Part Requests`
-   - `Orders`
-   - `Inventory`
-
-#### Part Requests Sheet (Columns A-S)
-```
-Request ID | Timestamp | Requester | Subsystem | Part Name | SKU | Part Link | Quantity | 
-Priority | Needed By | Inventory On-Hand | Vendor Stock | Est Unit Price | 
-Total Est Cost | Max Budget | Budget Status | Request Status | Mentor Notes | 
-Expedited Shipping
-```
-
-#### Orders Sheet (Columns A-O)
-```
-Order ID | Included Request IDs | Vendor | Part Name | SKU | Qty Ordered | 
-Final Unit Price | Total Cost | Order Date | Shipping Method | Tracking | 
-ETA | Received Date | Order Status | Mentor Notes
-```
-
-#### Inventory Sheet (Columns A-I)
-```
-SKU | Vendor | Part Name | Location | Qty On-Hand | Reorder Threshold | 
-Usage Rate | Last Count Date | Notes
-```
-
----
-
-### 2. Apps Script Setup
-
-#### Create Apps Script Project
-1. Open your Google Sheet
-2. Go to **Extensions → Apps Script**
-3. Delete any default code
-4. Copy the complete `Code.gs` from this repository
-5. Paste into the Apps Script editor
-6. **Save** (Ctrl+S or ⌘+S)
-
-#### Configure Gemini API Key
-1. In Apps Script, go to **Project Settings** (⚙️ on left)
-2. Scroll to **Script Properties**
-3. Click **Add script property**
-   - Property: `GEMINI_API_KEY`
-   - Value: `your-gemini-api-key-here` (Get from https://aistudio.google.com/apikey)
-4. Click **Save script properties**
-
-**Optional:** Configure Discord webhook for notifications
-5. Click **Add script property**
-   - Property: `DISCORD_PROCUREMENT_WEBHOOK_URL`
-   - Value: `your-discord-webhook-url`
-6. Click **Add script property** (optional)
-   - Property: `DISCORD_PROCUREMENT_ROLE_ID`
-   - Value: `your-role-id-for-pings`
-
-#### Deploy as Web App
-1. Click **Deploy → New deployment**
-2. Click gear icon ⚙️ next to "Select type"
-3. Choose **Web app**
-4. Configure:
-```
-   Description: FRC Parts Bot API
-   Execute as: Me (your-email@example.com)
-   Who has access: Anyone
-```
-5. Click **Deploy**
-6. Click **Authorize access**
-   - Choose your Google account
-   - Click "Advanced" → "Go to [Your Project]"
-   - Click "Allow"
-7. **Copy the Web app URL** (ends with `/exec`)
-   - Example: `https://script.google.com/macros/s/AKfycby.../exec`
-
-#### Test the Deployment
-Open the Web app URL in your browser. You should see:
-```
-OK FROM FRC PURCHASING WEB APP
-```
-
-#### Setup Dropdown Workflow
-1. In Google Sheets, go to **🎃 PartBot menu → ⚙️ Setup Dropdown Workflow**
-2. Click OK
-3. This configures status dropdowns with all values including 🚫 Cancelled
-
----
-
-### 3. Discord Bot Setup
-
-#### Create Discord Application
-1. Go to https://discord.com/developers/applications
-2. Click **New Application**
-3. Name it (e.g., "8793PartBot")
-4. Click **Create**
-
-#### Create Bot User
-1. Click **Bot** in left sidebar
-2. Click **Add Bot** → **Yes, do it!**
-3. Click **Reset Token** → **Yes, do it!**
-4. **Copy the token** (you'll only see it once!)
-5. Save it securely
-
-#### Get Application ID
-1. Click **General Information** in left sidebar
-2. Copy the **Application ID**
-
-#### Invite Bot to Server
-1. Click **OAuth2 → URL Generator**
-2. Select scopes:
-   - ✓ `bot`
-   - ✓ `applications.commands`
-3. Select bot permissions:
-   - ✓ Send Messages
-   - ✓ Use Slash Commands
-   - ✓ Embed Links
-4. Copy the generated URL
-5. Open URL in browser and invite bot to your server
-
-#### Get Guild ID
-1. Open Discord
-2. Go to **User Settings** (⚙️) → **Advanced**
-3. Enable **Developer Mode**
-4. Right-click your server icon
-5. Click **Copy Server ID**
-
----
-
-### 4. Server Setup (Google Cloud VM)
-
-#### Create VM Instance
-1. Go to https://console.cloud.google.com
-2. Navigate to **Compute Engine → VM instances**
-3. Click **Create Instance**
-4. Configure:
-```
-   Name: discord-bot-vm
-   Region: us-central1 (or closest)
-   Machine type: e2-micro (free tier)
-   Boot disk: Ubuntu 22.04 LTS, 10GB
-   Firewall: Allow HTTP and HTTPS traffic
-```
-5. Click **Create**
-
-#### Connect via SSH
-Click **SSH** button next to your VM instance in the console.
-
-#### Install Node.js and Git
-```bash
-# Update system
-sudo apt-get update && sudo apt-get upgrade -y
-
-# Install Node.js 18.x
-curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
-sudo apt-get install -y nodejs git
-
-# Verify installation
-node --version  # Should show v18.x.x
-npm --version   # Should show 9.x.x or higher
-```
-
-#### Clone Repository
-```bash
-cd ~
-git clone https://github.com/YOUR_USERNAME/8793PartBot.git
-cd 8793PartBot/discord-bot
-```
-
-#### Install Dependencies
-```bash
-npm install discord.js axios dotenv
-```
-
-#### Configure Environment Variables
-
-**Option A: Using .env file (Recommended)**
-```bash
-nano .env
-```
-
-Add:
-```env
-DISCORD_TOKEN=your-discord-bot-token-here
-CLIENT_ID=your-application-id-here
-GUILD_ID=your-guild-id-here
-APPS_SCRIPT_URL=https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec
-```
-
-Save with `Ctrl+X`, `Y`, `Enter`
-
-**Option B: Using ~/.bashrc (Persistent)**
-```bash
-nano ~/.bashrc
-```
-
-Add at the end:
-```bash
-export DISCORD_TOKEN="your-discord-bot-token-here"
-export CLIENT_ID="your-application-id-here"
-export GUILD_ID="your-guild-id-here"
-export APPS_SCRIPT_URL="https://script.google.com/macros/s/YOUR_DEPLOYMENT_ID/exec"
-```
-
-Save and reload:
-```bash
-source ~/.bashrc
-```
-
-#### Test the Bot
-```bash
-node bot.js
-```
-
-You should see:
-```
-[Bot] Registering slash commands...
-[Bot] ✅ Slash commands registered
-[Bot] ✅ Logged in as 8793PartBot#1234
-```
-
-Press `Ctrl+C` to stop.
-
-#### Install PM2 for 24/7 Operation
-```bash
-# Install PM2 globally
-sudo npm install -g pm2
-
-# Start bot with PM2
-pm2 start bot.js --name discord-bot
-
-# Configure auto-start on reboot
-pm2 startup
-# Copy and run the command it outputs
-
-# Save PM2 configuration
-pm2 save
-```
-
-#### Verify Bot is Running
-```bash
-pm2 status
-pm2 logs discord-bot
-```
-
----
-
-### 5. Test in Discord
-
-In your Discord server, type `/` and you should see:
-- `/requestpart`
-- `/cancelrequest`
-- `/inventory`
-- `/openorders`
-- `/orderstatus`
-
-#### Test Commands
-```
-/requestpart subsystem:Drive qty:1 priority:Medium
-
-/inventory search:wheel
-
-/openorders
-
-/orderstatus requestid:REQ-xxxxx
-
-/cancelrequest requestid:REQ-xxxxx reason:Testing
-```
-
----
-
-## Useful Commands
-
-### Managing the Bot (PM2)
-```bash
-# View status
-pm2 status
-
-# View real-time logs
-pm2 logs discord-bot
-
-# Restart bot
-pm2 restart discord-bot
-
-# Stop bot
-pm2 stop discord-bot
-
-# View detailed info
-pm2 show discord-bot
-
-# Monitor (dashboard view)
-pm2 monit
-```
-
-### Updating from GitHub
-```bash
-cd ~/8793PartBot/discord-bot
-pm2 stop discord-bot
-git pull origin main
-npm install  # If dependencies changed
-pm2 restart discord-bot
-pm2 logs discord-bot
-```
-
-### Updating Apps Script
-1. Edit Code.gs in Apps Script editor
-2. Click Save (💾)
-3. **Deploy → Manage deployments**
-4. Click pencil icon (✏️) to edit
-5. Under "Version", select **"New version"**
-6. Click **Deploy**
-7. URL stays the same - no bot restart needed
 
 ---
 
@@ -494,6 +205,7 @@ pm2 logs discord-bot
 /requestpart 
   subsystem:Drive           # Required: Drive, Intake, Shooter, etc.
   link:https://...          # Optional: Vendor URL (triggers AI enrichment)
+  sku:WCP-0785              # Optional: Exact SKU (overrides AI detection) ⭐ NEW!
   qty:2                     # Optional: Quantity (default: 1)
   maxbudget:50              # Optional: Maximum budget in USD
   priority:High             # Optional: Critical, High, Medium, Low
@@ -502,11 +214,30 @@ pm2 logs discord-bot
 
 **What happens:**
 1. Request created in Google Sheets
-2. AI enrichment extracts part name, SKU, price from URL
-3. Notification sent to Discord procurement channel
-4. Request ID returned (e.g., REQ-12345678)
+2. **User SKU written immediately** (if provided)
+3. AI enrichment extracts part name, SKU (if not user-specified), price from URL
+4. Notification sent to Discord procurement channel
+5. Discord shows: `SKU: **WCP-0785** (user-specified)` if you provided it
+6. Request ID returned (e.g., REQ-12345678)
 
-### `/cancelrequest` - Cancel Your Request (NEW!)
+**SKU field behavior:**
+- **With SKU:** `sku:WCP-0785` → Guaranteed correct, AI skips SKU extraction
+- **Without SKU:** AI attempts to extract SKU from product page
+- **Multi-variant pages:** Always specify SKU to avoid wrong variants
+
+**Examples:**
+```bash
+# Exact SKU for multi-variant page (recommended for WCP, McMaster)
+/requestpart subsystem:Drive link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
+
+# Let AI detect SKU (works well for single-product pages)
+/requestpart subsystem:Intake link:https://www.revrobotics.com/rev-21-1650/ qty:2
+
+# No link, no SKU (manual entry by mentor)
+/requestpart subsystem:Electrical notes:"5mm LED, red" qty:10
+```
+
+### `/cancelrequest` - Cancel Your Request
 ```
 /cancelrequest 
   requestid:REQ-12345678    # Required: Your request ID
@@ -544,9 +275,9 @@ pm2 logs discord-bot
 ```
 
 **Displays:**
-- Up to 10 open orders (not yet received)
-- Up to 5 denied requests
-- Order IDs, vendors, status, ETAs
+- Up to 15 open orders (not yet received)
+- Up to 15 denied requests
+- Order IDs, vendors, SKUs, status, ETAs
 
 ### `/orderstatus` - Check Status
 ```
@@ -556,7 +287,7 @@ pm2 logs discord-bot
 
 **Request status shows:**
 - Current status (Submitted, Approved, Ordered, etc.)
-- Part details
+- Part details including user-specified or AI-detected SKU
 - Linked orders (if any)
 
 **Order status shows:**
@@ -568,6 +299,65 @@ pm2 logs discord-bot
 ---
 
 ## Troubleshooting
+
+### SKU Field Not Appearing in Discord
+
+**Problem:** `/requestpart` command doesn't show `sku` option
+
+**Solution:**
+```bash
+# On your VM:
+cd ~/8793PartBot/discord-bot
+
+# Verify SKU field is in bot.js code
+grep -n "setName('sku')" bot.js
+# Should show 2 lines: one in /requestpart, one in /inventory
+
+# Delete and re-register commands
+pm2 delete discord-bot
+pm2 start bot.js --name discord-bot
+pm2 save
+
+# Completely quit and reopen Discord
+# (or use Discord in incognito browser)
+```
+
+### User SKU Not Being Saved
+
+**Problem:** User specifies SKU but it doesn't appear in Google Sheets
+
+**Check Apps Script Code.gs:**
+1. Line ~191 in `handleDiscordRequest_` should have:
+   ```javascript
+   sku: body.sku || '',
+   ```
+
+2. Line ~243 in `createPartRequest_` should have:
+   ```javascript
+   if (data.sku) {
+     sheet.getRange(nextRow, PART_REQUESTS_COLS.SKU).setValue(data.sku);
+   }
+   ```
+
+3. Verify `PART_REQUESTS_COLS.SKU` points to correct column (usually column 6 = F)
+
+4. Check Execution logs: Extensions → Apps Script → Executions
+   - Look for: `[createPartRequest_] User provided SKU: WCP-0785`
+
+### AI Not Extracting SKU (When User Doesn't Provide One)
+
+**Problem:** AI enrichment fills Part Name but not SKU
+
+**Common causes:**
+1. **Multi-variant pages:** Use user SKU field instead
+2. **Page fetch failed:** Check Execution logs for HTTP errors
+3. **Gemini rate limit:** Free tier = 15 requests/minute
+4. **Complex page structure:** Some vendor pages are hard to parse
+
+**Solutions:**
+- For multi-variant pages: Always use `sku:WCP-XXXX` parameter
+- For single-product pages: Check Execution logs for specific errors
+- Manual enrichment: Select row → **🎃 PartBot → ✨ Enrich Part Request**
 
 ### Bot Shows Offline in Discord
 ```bash
@@ -583,15 +373,6 @@ echo $APPS_SCRIPT_URL
 
 # Restart bot
 pm2 restart discord-bot
-```
-
-### Commands Not Appearing in Discord
-```bash
-# Re-register commands
-pm2 stop discord-bot
-node bot.js  # Watch for registration messages
-# Press Ctrl+C after seeing "✅ Slash commands registered"
-pm2 start discord-bot
 ```
 
 ### "Error from Sheets" Message
@@ -612,100 +393,52 @@ pm2 start discord-bot
 1. Run **🎃 PartBot → ⚙️ Setup Dropdown Workflow** in Google Sheets
 2. This adds "🚫 Cancelled" to the allowed status values
 
-### AI Enrichment Not Working
-1. Check **GEMINI_API_KEY** in Script Properties
-2. View Execution log: Extensions → Apps Script → Executions
-3. Try manual enrichment: Select row → **🎃 PartBot → ✨ Enrich Part Request**
-4. Check logs for specific errors
-
-### Inventory Search Returns No Results
-1. Verify Inventory sheet has data
-2. Check column headers match exactly
-3. Try exact SKU: `/inventory sku:WCP-0783`
-
 ---
 
-## Configuration
+## Best Practices
 
-### Shared Constants
-The `shared-constants.js` file defines the API contract between bot.js and Code.gs:
-- Action names (`discordRequest`, `inventory`, `cancelRequest`, etc.)
-- Field names for requests and responses
-- Validation limits
-- Display limits
-- Error codes
+### When to Use the SKU Field
 
-**Important:** If you modify shared-constants.js, update BOTH bot.js and Code.gs.
+**✅ Always use SKU for:**
+- Multi-variant product pages (WCP ball bearings, McMaster hardware)
+- Parts with multiple size/color/type options on one page
+- When you know the exact part number
+- Critical parts where wrong variant = project failure
 
-### Column Indices
-Column positions are defined in constants at the top of Code.gs:
-```javascript
-const PART_REQUESTS_COLS = {
-  REQUEST_ID: 1,
-  TIMESTAMP: 2,
-  REQUESTER: 3,
-  // ... etc
-};
-```
+**⚠️ Optional for:**
+- Single-product vendor pages (most REV/AndyMark products)
+- Parts where AI can easily determine the SKU
+- Prototyping parts where exact variant doesn't matter
 
-If you change column order in Google Sheets, update these constants.
+**❌ Don't use SKU for:**
+- Requests without a vendor link
+- Generic part descriptions ("need M5 bolts")
 
-### Status Values
-All possible request statuses are defined in Code.gs:
-```javascript
-const STATUS = {
-  SUBMITTED: '📥 Submitted',
-  UNDER_REVIEW: '👀 Under Review',
-  APPROVED: '✅ Approved',
-  ORDERED: '🛒 Ordered',
-  RECEIVED: '📦 Received',
-  COMPLETE: '✔️ Complete',
-  DENIED: '❌ Denied',
-  ON_HOLD: '⏸️ On Hold',
-  CANCELLED: '🚫 Cancelled'
-};
-```
+**Examples:**
 
----
-
-## Security Best Practices
-
-### Never Commit Secrets
-Add to `.gitignore`:
-```
-.env
-node_modules/
-*.log
-.DS_Store
-```
-
-### Rotate Tokens Regularly
-- Discord bot token
-- Gemini API key
-- Apps Script deployment
-
-### Restrict Apps Script Access
-- Execute as: **Me** (not "User accessing the web app")
-- Who has access: **Anyone** (required for Discord integration)
-
-### Monitor Logs
 ```bash
-# Check for suspicious activity
-pm2 logs discord-bot | grep ERROR
+# GOOD: Multi-variant page with specific SKU
+/requestpart subsystem:Drive link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
+
+# GOOD: Single-product page, let AI detect
+/requestpart subsystem:Intake link:https://www.revrobotics.com/rev-21-1650/ qty:2
+
+# GOOD: McMaster with known part number
+/requestpart subsystem:Mechanical link:https://mcmaster.com/93475A230/ sku:93475A230 qty:20
+
+# BAD: Generic request (use notes instead)
+/requestpart subsystem:Electrical notes:"Red 5mm LEDs" qty:10
 ```
-
-### Request Cancellation Security
-- Students can only cancel their own requests
-- Cancellation blocked if already ordered/received
-- All actions logged with timestamps
-- Mentor notes preserve audit trail
-
-### Use Environment Variables
-Never hardcode credentials in code.
 
 ---
 
 ## Roadmap
+
+### Recently Added Features ✅
+- [x] User SKU override field (December 2024) ✅
+- [x] Student self-service cancellation ✅
+- [x] AI enrichment with Gemini API ✅
+- [x] Location-based inventory search ✅
 
 ### Planned Features
 - [ ] Vendor API integrations (REV, AndyMark direct ordering)
@@ -716,11 +449,11 @@ Never hardcode credentials in code.
 - [ ] Predictive part ordering based on historical data
 - [ ] Multi-team support
 - [ ] Automated reorder points for consumables
-- [x] Student self-service cancellation ✅
-- [x] AI enrichment with Gemini API ✅
+- [ ] SKU validation against vendor databases
 
 ### Known Issues
 - Gemini occasionally returns incomplete data for complex product pages
+  - **Workaround:** Use `sku` parameter for multi-variant pages
 - Date formatting varies by locale
 - Rate limiting on Gemini API (15 requests/minute on free tier)
 
@@ -797,7 +530,7 @@ This requirement does **not** restrict your rights granted under the MIT License
 - **Google** for Apps Script and Sheets infrastructure
 - **Discord** for the platform and excellent API
 - **FRC vendor community** (REV, AndyMark, WCP, VEX) for supporting robotics education
-- **FRC Team 8793 students** for testing and feedback
+- **FRC Team 8793 students** (especially Tyler H. for the SKU field feature request!) for testing and feedback
 
 ---
 
