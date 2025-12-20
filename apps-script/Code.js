@@ -97,7 +97,8 @@ const STATUS = {
   RECEIVED: '📦 Received',
   COMPLETE: '✔️ Complete',
   DENIED: '❌ Denied',
-  ON_HOLD: '⏸️ On Hold'
+  ON_HOLD: '⏸️ On Hold',
+  CANCELLED: '🚫 Cancelled'
 };
 
 /******************************************************
@@ -141,8 +142,12 @@ function doPost(e) {
       return handleOrderStatus_(body);
     }
 
-    if (action === 'openOrders') {
+     if (action === 'openOrders') {
       return handleOpenOrders_(body);
+    }
+
+    if (action === 'cancelRequest') {
+      return handleCancelRequest_(body);
     }
 
     return jsonResponse_({ status: 'error', message: 'Unknown action: ' + action });
@@ -632,9 +637,20 @@ JSON:`;
 }
 
 /**
- * Manual test function for AI enrichment
+ * Enrich Part Request with AI
+ * 
+ * Automatically fills in Part Name, SKU, and price from the product URL.
+ * Use this feature when:
+ * - A request was created before AI enrichment was enabled
+ * - Enrichment failed and you want to retry
+ * - You want to update enrichment data
+ * 
+ * How to use:
+ * 1. Click on any row in the Part Requests sheet
+ * 2. Go to 🎃 PartBot menu → ✨ Enrich Part Request
+ * 3. AI will extract info from the Part Link column
  */
-function testEnrichment() {
+function enrichSelectedRequest() {
   const ss = SpreadsheetApp.getActive();
   const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
   const ui = SpreadsheetApp.getUi();
@@ -654,8 +670,7 @@ function testEnrichment() {
     return;
   }
   
-  ui.alert('Testing AI Enrichment', `Enriching ${requestID}...\n\nCheck the Execution log for results.`, ui.ButtonSet.OK);
-  
+  ui.alert('AI Enrichment', `Enriching ${requestID}...\n\nThis will extract Part Name, SKU, and price from the product URL.`, ui.ButtonSet.OK);  
   enrichPartRequest(requestID, row);
   
   ui.alert('✅ Done!', 'Check the spreadsheet and Execution log for results.', ui.ButtonSet.OK);
@@ -1281,6 +1296,122 @@ function onEdit(e) {
 /******************************************************
  * DROPDOWN STATUS HANDLERS
  ******************************************************/
+/******************************************************
+ * CANCEL REQUEST HANDLER
+ ******************************************************/
+
+function handleCancelRequest_(body) {
+  try {
+    const requestId = (body.requestId || '').toString().trim().toUpperCase();
+    const canceller = (body.canceller || '').toString().trim();
+    const reason = (body.reason || 'No reason provided').toString().trim();
+    
+    Logger.log(`[handleCancelRequest_] Request: ${requestId}, Canceller: ${canceller}, Reason: ${reason}`);
+    
+    if (!requestId) {
+      return jsonResponse_({
+        status: 'error',
+        message: 'Request ID is required'
+      });
+    }
+    
+    const ss = SpreadsheetApp.getActive();
+    const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+    
+    if (!sheet) {
+      return jsonResponse_({
+        status: 'error',
+        message: 'Part Requests sheet not found'
+      });
+    }
+    
+    // Find the request
+    const data = sheet.getDataRange().getValues();
+    let foundRow = null;
+    let requestData = null;
+    
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      const id = (row[PART_REQUESTS_COLS.REQUEST_ID - 1] || '').toString().trim();
+      
+      if (id === requestId) {
+        foundRow = i + 1;
+        requestData = row;
+        break;
+      }
+    }
+    
+    if (!foundRow) {
+      return jsonResponse_({
+        status: 'error',
+        message: `Request ${requestId} not found`
+      });
+    }
+    
+    // Check if requester matches (security check)
+    const originalRequester = (requestData[PART_REQUESTS_COLS.REQUESTER - 1] || '').toString().trim();
+    if (originalRequester !== canceller) {
+      Logger.log(`[handleCancelRequest_] Permission denied: ${canceller} tried to cancel ${originalRequester}'s request`);
+      return jsonResponse_({
+        status: 'error',
+        message: `You can only cancel your own requests. This request belongs to ${originalRequester}.`
+      });
+    }
+    
+    // Check current status
+    const currentStatus = (requestData[PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString().trim();
+    
+    // Don't allow cancellation if already ordered, received, or complete
+    if (currentStatus.includes('Ordered') || 
+        currentStatus.includes('🛒') ||
+        currentStatus.includes('Received') || 
+        currentStatus.includes('📦') ||
+        currentStatus.includes('Complete') ||
+        currentStatus.includes('✔️')) {
+      return jsonResponse_({
+        status: 'error',
+        message: `Cannot cancel - request is already ${currentStatus}. Please contact a mentor.`
+      });
+    }
+    
+    // Already cancelled?
+    if (currentStatus.includes('Cancel') || currentStatus.includes('🚫')) {
+      return jsonResponse_({
+        status: 'error',
+        message: 'Request is already cancelled'
+      });
+    }
+    
+    // Update the request
+    const timestamp = new Date().toLocaleString();
+    
+    // Set status to Cancelled
+    sheet.getRange(foundRow, PART_REQUESTS_COLS.REQUEST_STATUS).setValue('🚫 Cancelled');
+    
+    // Update mentor notes
+    const currentNotes = sheet.getRange(foundRow, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || '';
+    const updatedNotes = currentNotes + `\n[${timestamp}] 🚫 Cancelled by ${canceller}: ${reason}`;
+    sheet.getRange(foundRow, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
+    
+    // Color the row gray to indicate cancelled
+    sheet.getRange(foundRow, 1, 1, sheet.getLastColumn()).setBackground('#e0e0e0');
+    
+    Logger.log(`[handleCancelRequest_] ${requestId} cancelled by ${canceller}`);
+    
+    return jsonResponse_({
+      status: 'ok',
+      message: 'Request cancelled successfully',
+      requestId: requestId
+    });
+    
+  } catch (err) {
+    Logger.log('[handleCancelRequest_] Error: ' + err);
+    return jsonResponse_({
+      status: 'error',
+      message: err.toString()
+    });
+  }
+}
 
 function handleApproved(sheet, row) {
   const ss = SpreadsheetApp.getActive();
@@ -1676,7 +1807,7 @@ function onOpen() {
     .addSeparator()
     .addItem('📊 Show Workflow Guide', 'showWorkflowGuide')
     .addItem('🧹 Clean Up Empty Rows', 'cleanupEmptyRows')
-    .addItem('✨ Test AI Enrichment', 'testEnrichment')
+    .addItem('✨ Enrich Part Request', 'enrichSelectedRequest')
     .addToUi();
 }
 

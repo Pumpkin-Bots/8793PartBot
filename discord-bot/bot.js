@@ -131,6 +131,20 @@ const commands = [
     )
     .addStringOption(option =>
       option.setName('search').setDescription('Keyword search').setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('cancelrequest')
+    .setDescription('Cancel your own part request')
+    .addStringOption(option =>
+      option.setName('requestid')
+        .setDescription('Request ID (e.g. REQ-12345678)')
+        .setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName('reason')
+        .setDescription('Reason for cancellation (optional)')
+        .setRequired(false)
     )
 ].map(cmd => cmd.toJSON());
 
@@ -169,6 +183,9 @@ client.on('interactionCreate', async interaction => {
         break;
       case 'openorders':
         await handleOpenOrders(interaction);
+        break;
+      case 'cancelrequest':
+        await handleCancelRequest(interaction);
         break;
     }
   } catch (err) {
@@ -253,56 +270,40 @@ async function handleOpenOrders(interaction) {
     if (orders.length === 0) {
       lines.push('No open orders.\n');
     } else {
-      const shown = orders.slice(0, 10);
+      const shown = orders.slice(0, 15);
       lines.push(`Total: ${orders.length}\n`);
 
       for (const o of shown) {
         lines.push(
           `• **${o.orderId}** — ${o.vendor || 'Unknown'}`,
-          `  ${o.partName || '(no name)'}`,
-          `  Status: ${o.status || 'Unknown'}\n`
+          `  Part: ${o.partName || '(no name)'}`,
+          `  SKU: ${o.sku || '(none)'} | Qty: ${o.qty || 'N/A'}`,
+          `  Status: ${o.status || 'Unknown'}`,
+          `  Ordered: ${formatDate(o.orderDate)} | ETA: ${formatEta(o.eta)}`,
+          `  Tracking: ${o.tracking || '—'}\n`
         );
-      }
-      
-      if (orders.length > 10) {
-        lines.push(`...and ${orders.length - 10} more orders\n`);
       }
     }
 
     if (denied.length > 0) {
-      const shownDenied = denied.slice(0, 5);
+      const shownDenied = denied.slice(0, 15);
       lines.push('⚠️ **Denied Requests**');
       lines.push(`Total: ${denied.length}\n`);
 
       for (const r of shownDenied) {
         lines.push(
           `• **${r.id}** — ${r.partName || '(no name)'}`,
-          `  Requester: ${r.requester || 'Unknown'}\n`
+          `  Requester: ${r.requester || 'Unknown'}`,
+          `  Notes: ${r.mentorNotes || '—'}\n`
         );
       }
-      
-      if (denied.length > 5) {
-        lines.push(`...and ${denied.length - 5} more denied\n`);
-      }
     }
 
-    const message = lines.join('\n');
-    
-    if (message.length > 1950) {
-      return interaction.editReply(
-        `📦 **Open Orders Summary**\n\n` +
-        `Open orders: ${orders.length}\n` +
-        `Denied requests: ${denied.length}\n\n` +
-        `Too many items to display. Check the spreadsheet for details.`
-      );
-    }
-
-    return interaction.editReply(message);
+    return interaction.editReply(lines.join('\n'));
 
   } catch (err) {
     console.error('[handleOpenOrders] Error:', err.message);
-    console.error('[handleOpenOrders] Stack:', err.stack);
-    return interaction.editReply(`❌ Error: ${err.message}`);
+    return interaction.editReply('❌ Failed to contact Google Sheets');
   }
 }
 
@@ -439,6 +440,41 @@ async function handleInventory(interaction) {
 
   } catch (err) {
     console.error('[handleInventory] Error:', err.message);
+    return interaction.editReply('❌ Failed to contact Google Sheets');
+  }
+}
+
+async function handleCancelRequest(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const requestId = interaction.options.getString('requestid').trim().toUpperCase();
+  const reason = interaction.options.getString('reason') || 'No reason provided';
+  const requester = interaction.user.username;
+
+  try {
+    const payload = {
+      action: 'cancelRequest',
+      requestId: requestId,
+      canceller: requester,
+      reason: reason
+    };
+
+    const response = await axios.post(APPS_SCRIPT_URL, payload);
+    const data = response.data;
+
+    if (data.status === 'ok') {
+      return interaction.editReply(
+        `✅ **Request Cancelled**\n\n` +
+        `Request ID: ${requestId}\n` +
+        `Reason: ${reason}\n\n` +
+        `The request has been cancelled and marked in the system.`
+      );
+    } else {
+      return interaction.editReply(`❌ ${data.message || 'Failed to cancel request'}`);
+    }
+
+  } catch (err) {
+    console.error('[handleCancelRequest] Error:', err.message);
     return interaction.editReply('❌ Failed to contact Google Sheets');
   }
 }
