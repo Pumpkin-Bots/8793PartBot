@@ -751,13 +751,6 @@ node bot.js
 ## Maintainers
 
 **FRC Team 8793 – Pumpkin Bots**  
-
-- **Head Coach & Lead Technical Mentor:** Franz Dill
-- **Team Manager:** Jennifer Dill
-- **Remote Mechanical Mentor:** Eli Dill
-- **Build Team Co-Leads:** Patton Family
-- **AI Development Assistant:** Claude (Anthropic)
-
 Contact: pumpkinbots@hmbrobotics.org
 
 ---
