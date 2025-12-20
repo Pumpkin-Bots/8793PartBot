@@ -242,6 +242,16 @@ function createPartRequest_(data) {
   sheet.getRange(nextRow, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(data.notes);
   sheet.getRange(nextRow, PART_REQUESTS_COLS.EXPEDITED_SHIPPING).setValue(expeditedShipping);
   
+  // ✨ TRIGGER AI ENRICHMENT
+  if (data.partLink) {
+    try {
+      enrichPartRequest(requestID, nextRow);
+    } catch (err) {
+      Logger.log('[createPartRequest_] Enrichment failed: ' + err);
+      // Don't throw - enrichment failure shouldn't break request creation
+    }
+  }
+  
   return { requestID: requestID, row: nextRow };
 }
 
@@ -301,6 +311,354 @@ function sendProcurementNotification_(request) {
   } catch (err) {
     Logger.log('[sendProcurementNotification_] Error: ' + err);
   }
+}
+
+/******************************************************
+ * AI ENRICHMENT SYSTEM - Gemini API
+ ******************************************************/
+
+function enrichPartRequest(requestID, row) {
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  
+  if (!sheet) {
+    Logger.log('[enrichPartRequest] Part Requests sheet not found');
+    return;
+  }
+  
+  try {
+    Logger.log(`[enrichPartRequest] Starting enrichment for ${requestID} at row ${row}`);
+    
+    const partLink = sheet.getRange(row, PART_REQUESTS_COLS.PART_LINK).getValue();
+    const existingPartName = sheet.getRange(row, PART_REQUESTS_COLS.PART_NAME).getValue();
+    const existingSku = sheet.getRange(row, PART_REQUESTS_COLS.SKU).getValue();
+    
+    Logger.log(`[enrichPartRequest] Part Link: ${partLink}`);
+    Logger.log(`[enrichPartRequest] Existing Part Name: ${existingPartName}`);
+    Logger.log(`[enrichPartRequest] Existing SKU: ${existingSku}`);
+    
+    // Only enrich if we have a link and missing name/SKU
+    if (!partLink || (existingPartName && existingSku)) {
+      Logger.log('[enrichPartRequest] No link or already has name/SKU, skipping');
+      return;
+    }
+    
+    Logger.log(`[enrichPartRequest] Enriching ${requestID} with link: ${partLink}`);
+    
+    // Fetch the webpage content
+    Logger.log('[enrichPartRequest] Fetching page content...');
+    const pageContent = fetchPageContent_(partLink);
+    if (!pageContent) {
+      Logger.log('[enrichPartRequest] ERROR: Could not fetch page content');
+      return;
+    }
+    
+    Logger.log(`[enrichPartRequest] Got page content, length: ${pageContent.length}`);
+    Logger.log(`[enrichPartRequest] First 500 chars: ${pageContent.substring(0, 500)}`);
+    Logger.log(`[enrichPartRequest] Last 500 chars: ${pageContent.substring(Math.max(0, pageContent.length - 500))}`);
+    
+    // Extract info using Gemini
+    Logger.log('[enrichPartRequest] Calling Gemini API...');
+    let extracted = extractWithGemini_(pageContent, partLink);
+    
+    // If Gemini failed completely (returned null), create empty object
+    if (!extracted) {
+      Logger.log('[enrichPartRequest] ERROR: Gemini extraction failed');
+      extracted = { partName: null, sku: null, price: null };
+    } else {
+      Logger.log(`[enrichPartRequest] Extraction successful: ${JSON.stringify(extracted)}`);
+    }
+    
+    // FALLBACK: If extraction failed and it's McMaster-Carr, use SKU fallback
+    if ((!extracted.partName || !extracted.sku) && partLink.toLowerCase().includes('mcmaster.com')) {
+      Logger.log('[enrichPartRequest] McMaster detected - using SKU fallback');
+      
+      // Extract SKU from McMaster URL (format: mcmaster.com/XXXXYYYY or mcmaster.com/XXXX-YYYY)
+      const urlMatch = partLink.match(/mcmaster\.com\/([0-9A-Z\-]+)/i);
+      if (urlMatch && urlMatch[1]) {
+        const mcmasterSku = urlMatch[1].toUpperCase();
+        Logger.log(`[enrichPartRequest] Extracted McMaster SKU from URL: ${mcmasterSku}`);
+        
+        // Simple fallback - just use SKU in a clean format
+        if (!extracted.partName) {
+          extracted.partName = `McMaster ${mcmasterSku}`;
+        }
+        if (!extracted.sku) {
+          extracted.sku = mcmasterSku;
+        }
+        
+        Logger.log(`[enrichPartRequest] Using McMaster fallback: ${extracted.partName}`);
+      }
+    }
+    
+    Logger.log(`[enrichPartRequest] Final extraction (after fallbacks): ${JSON.stringify(extracted)}`);
+    
+    // FALLBACK: Amazon - extract from URL if page fetch failed
+    if ((!extracted.partName || !extracted.sku) && partLink.toLowerCase().includes('amazon.com')) {
+      Logger.log('[enrichPartRequest] Amazon detected - checking for URL-based extraction');
+      
+      // Extract product name from URL slug (between product title and /dp/)
+      const nameMatch = partLink.match(/amazon\.com\/([^\/]+)\/dp\//i);
+      if (nameMatch && nameMatch[1]) {
+        const urlSlug = decodeURIComponent(nameMatch[1].replace(/-/g, ' '));
+        Logger.log(`[enrichPartRequest] Extracted Amazon name from URL: ${urlSlug}`);
+        
+        if (!extracted.partName && urlSlug.length > 3 && urlSlug.length < 150) {
+          extracted.partName = urlSlug;
+        }
+      }
+      
+      // Extract ASIN (Amazon product ID)
+      const asinMatch = partLink.match(/\/dp\/([A-Z0-9]{10})/i);
+      if (asinMatch && asinMatch[1]) {
+        const asin = asinMatch[1].toUpperCase();
+        Logger.log(`[enrichPartRequest] Extracted Amazon ASIN: ${asin}`);
+        
+        if (!extracted.sku) {
+          extracted.sku = asin;
+        }
+      }
+      
+      Logger.log(`[enrichPartRequest] Amazon fallback result: ${JSON.stringify(extracted)}`);
+    }
+    
+    // Update the spreadsheet
+    let updated = false;
+    
+    if (extracted.partName && !existingPartName) {
+      Logger.log(`[enrichPartRequest] Writing Part Name: ${extracted.partName}`);
+      sheet.getRange(row, PART_REQUESTS_COLS.PART_NAME).setValue(extracted.partName);
+      updated = true;
+      Logger.log(`[enrichPartRequest] ✓ Set part name`);
+    }
+    
+    if (extracted.sku && !existingSku) {
+      Logger.log(`[enrichPartRequest] Writing SKU: ${extracted.sku}`);
+      sheet.getRange(row, PART_REQUESTS_COLS.SKU).setValue(extracted.sku);
+      updated = true;
+      Logger.log(`[enrichPartRequest] ✓ Set SKU`);
+    }
+    
+    if (extracted.price) {
+      Logger.log(`[enrichPartRequest] Writing Price: ${extracted.price}`);
+      sheet.getRange(row, PART_REQUESTS_COLS.EST_UNIT_PRICE).setValue(extracted.price);
+      updated = true;
+      Logger.log(`[enrichPartRequest] ✓ Set price`);
+    }
+    
+    if (updated) {
+      // Update mentor notes with AI enrichment timestamp
+      const timestamp = new Date().toLocaleString();
+      const currentNotes = sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || '';
+      const updatedNotes = currentNotes + `\n[${timestamp}] ✨ AI enriched`;
+      Logger.log(`[enrichPartRequest] Writing mentor notes: ${updatedNotes}`);
+      sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
+      Logger.log(`[enrichPartRequest] ✓ Updated mentor notes`);
+    }
+    
+    Logger.log(`[enrichPartRequest] ✅ Successfully enriched ${requestID}`);
+    
+  } catch (err) {
+    Logger.log(`[enrichPartRequest] ERROR: ${err}`);
+    Logger.log(`[enrichPartRequest] Stack: ${err.stack}`);
+  }
+}
+
+function fetchPageContent_(url) {
+  try {
+    // Special handling for McMaster
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+      'Accept-Language': 'en-US,en;q=0.5',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Connection': 'keep-alive',
+      'Upgrade-Insecure-Requests': '1'
+    };
+    
+    const response = UrlFetchApp.fetch(url, {
+      muteHttpExceptions: true,
+      followRedirects: true,
+      headers: headers
+    });
+    
+    if (response.getResponseCode() !== 200) {
+      Logger.log(`[fetchPageContent_] HTTP ${response.getResponseCode()} for ${url}`);
+      return null;
+    }
+    
+    const html = response.getContentText();
+    
+    // For McMaster, try to extract from meta tags or title before stripping HTML
+    if (url.toLowerCase().includes('mcmaster.com')) {
+      Logger.log(`[fetchPageContent_] Attempting McMaster meta extraction...`);
+      
+      // Try to find product title in meta tags
+      const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
+      if (titleMatch && titleMatch[1]) {
+        const title = titleMatch[1].trim();
+        Logger.log(`[fetchPageContent_] Found title: ${title}`);
+        if (title !== 'McMaster-Carr' && !title.includes('JavaScript')) {
+          return `Product Title: ${title}\n\n${html}`;
+        }
+      }
+      
+      // Try meta description
+      const metaMatch = html.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i);
+      if (metaMatch && metaMatch[1]) {
+        Logger.log(`[fetchPageContent_] Found meta description: ${metaMatch[1]}`);
+        return `Product: ${metaMatch[1]}\n\n${html}`;
+      }
+    }
+    
+    // Extract text from HTML (simple version)
+    let text = html
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '') // Remove scripts
+      .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '') // Remove styles
+      .replace(/<[^>]+>/g, ' ') // Remove HTML tags
+      .replace(/\s+/g, ' ') // Normalize whitespace
+      .trim();
+    
+    // Limit to first 8000 chars to stay within token limits
+    if (text.length > 8000) {
+      text = text.substring(0, 8000);
+    }
+    
+    return text;
+    
+  } catch (err) {
+    Logger.log(`[fetchPageContent_] Error: ${err}`);
+    return null;
+  }
+}
+
+function extractWithGemini_(pageContent, url) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    const apiKey = props.getProperty('GEMINI_API_KEY');
+    
+    if (!apiKey) {
+      Logger.log('[extractWithGemini_] No GEMINI_API_KEY found in script properties');
+      return null;
+    }
+    
+    // Detect vendor for better prompting
+    const vendor = detectVendor(url);
+    
+    const prompt = `You are analyzing a product page for an FRC robotics parts ordering system.
+
+URL: ${url}
+Vendor: ${vendor}
+
+Page content:
+${pageContent}
+
+Extract the following information in JSON format:
+{
+  "partName": "the full product name/title",
+  "sku": "the product SKU/part number/model number",
+  "price": "the unit price as a number (no currency symbol)"
+}
+
+Rules:
+- Part name should be descriptive but concise (under 100 chars)
+- SKU should be the vendor's part number (like "217-4583" for McMaster, "WCP-0350" for WCP)
+- Price should be numeric only (e.g., 12.99 not "$12.99")
+- If you can't find something, use null
+- Return ONLY valid JSON, no other text
+
+JSON:`;
+    
+    const apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+    
+    const payload = {
+      contents: [{
+        parts: [{
+          text: prompt
+        }]
+      }],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 500
+      }
+    };
+    
+    const response = UrlFetchApp.fetch(`${apiUrl}?key=${apiKey}`, {
+      method: 'post',
+      contentType: 'application/json',
+      payload: JSON.stringify(payload),
+      muteHttpExceptions: true
+    });
+    
+    const responseCode = response.getResponseCode();
+    if (responseCode !== 200) {
+      Logger.log(`[extractWithGemini_] API returned ${responseCode}: ${response.getContentText()}`);
+      return null;
+    }
+    
+    const data = JSON.parse(response.getContentText());
+    
+    if (!data.candidates || data.candidates.length === 0) {
+      Logger.log('[extractWithGemini_] No candidates in response');
+      return null;
+    }
+    
+    const text = data.candidates[0].content.parts[0].text;
+    Logger.log(`[extractWithGemini_] Raw response: ${text}`);
+    
+    // Extract JSON from response (might have markdown backticks)
+    let jsonText = text.trim();
+    if (jsonText.startsWith('```json')) {
+      jsonText = jsonText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
+    } else if (jsonText.startsWith('```')) {
+      jsonText = jsonText.replace(/```\n?/g, '');
+    }
+    
+    const extracted = JSON.parse(jsonText);
+    
+    Logger.log(`[extractWithGemini_] Extracted: ${JSON.stringify(extracted)}`);
+    
+    return {
+      partName: extracted.partName || null,
+      sku: extracted.sku || null,
+      price: extracted.price ? parseFloat(extracted.price) : null
+    };
+    
+  } catch (err) {
+    Logger.log(`[extractWithGemini_] Error: ${err}`);
+    Logger.log(`[extractWithGemini_] Stack: ${err.stack}`);
+    return null;
+  }
+}
+
+/**
+ * Manual test function for AI enrichment
+ */
+function testEnrichment() {
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  const ui = SpreadsheetApp.getUi();
+  
+  // Get the currently selected row
+  const selection = sheet.getActiveRange();
+  if (!selection || selection.getRow() < 2) {
+    ui.alert('Please select a request row first');
+    return;
+  }
+  
+  const row = selection.getRow();
+  const requestID = sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_ID).getValue();
+  
+  if (!requestID) {
+    ui.alert('No request ID found in selected row');
+    return;
+  }
+  
+  ui.alert('Testing AI Enrichment', `Enriching ${requestID}...\n\nCheck the Execution log for results.`, ui.ButtonSet.OK);
+  
+  enrichPartRequest(requestID, row);
+  
+  ui.alert('✅ Done!', 'Check the spreadsheet and Execution log for results.', ui.ButtonSet.OK);
 }
 
 /******************************************************
@@ -1318,6 +1676,7 @@ function onOpen() {
     .addSeparator()
     .addItem('📊 Show Workflow Guide', 'showWorkflowGuide')
     .addItem('🧹 Clean Up Empty Rows', 'cleanupEmptyRows')
+    .addItem('✨ Test AI Enrichment', 'testEnrichment')
     .addToUi();
 }
 
