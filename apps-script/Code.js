@@ -1332,8 +1332,8 @@ function handleCancelRequest_(body) {
     
     for (let i = 1; i < data.length; i++) {
       const row = data[i];
-      const id = (row[PART_REQUESTS_COLS.REQUEST_ID - 1] || '').toString().trim();
-      
+      const id = (row[PART_REQUESTS_COLS.REQUEST_ID - 1] || '').toString().trim().toUpperCase();
+
       if (id === requestId) {
         foundRow = i + 1;
         requestData = row;

@@ -3,8 +3,9 @@
 ## Overview
 8793PartBot is an automation system built for **FRC Team 8793 – Pumpkin Bots** to streamline:
 - Part requests from students via Discord slash commands
-- Automatic SKU/name extraction via AI (OpenAI GPT-4o-mini)
+- Automatic SKU/name extraction via AI (Google Gemini 2.5 Flash)
 - Real-time inventory lookup
+- Student self-service request cancellation
 - Purchasing approvals and workflow management
 - Order tracking with ETA notifications
 - Discord ↔ Google Sheets integration
@@ -15,34 +16,54 @@ It replaces DM chaos, ad‑hoc spreadsheets, and manual vendor lookups with a st
 
 ## Features
 
-### 🔧 AI-Powered Part Enrichment
+### 🔧 AI-Powered Part Enrichment (Gemini 2.5 Flash)
 Automatically extracts from a vendor URL:
 - Part name
 - SKU / product code
 - Estimated price
-- Stock availability
-- Variant selection (AI uses student-provided hint text)
 
-Supports major FRC vendors:
-- REV Robotics
-- AndyMark
-- West Coast Products (WCP)
-- VEX Robotics
-- McMaster-Carr
-- DigiKey
-- Amazon
+**Supported vendors:**
+- ✅ West Coast Products (WCP)
+- ✅ REV Robotics
+- ✅ VexPro
+- ✅ AndyMark
+- ✅ Amazon (URL-based extraction)
+- ✅ McMaster-Carr (SKU-based extraction)
+- ✅ CTRE
+- ✅ Studica
+- ✅ Redux Robotics
+- ✅ Thrifty Bot
+
+**Fallback strategies:**
+- **Amazon:** Extracts product name from URL slug + ASIN
+- **McMaster-Carr:** Extracts SKU from URL pattern
+- **Other vendors:** Intelligent pattern matching
 
 ### 💬 Discord Slash Commands
 Students request parts using intuitive slash commands:
 ```
-/requestpart subsystem:Drive link:<URL> qty:2 priority:High notes:"0.5 inch bore"
+/requestpart subsystem:Drive link:<URL> qty:2 priority:High notes:"For shooter prototype"
 ```
 
-All commands:
+**All commands:**
 - `/requestpart` - Submit a new part request
+- `/cancelrequest` - Cancel your own request (**NEW!**)
 - `/inventory` - Search inventory by SKU or keyword
 - `/openorders` - View all pending orders and denied requests
 - `/orderstatus` - Check status of a specific request or order
+
+### 🚫 Request Cancellation (NEW!)
+Students can now cancel their own requests:
+```
+/cancelrequest requestid:REQ-12345678 reason:No longer needed
+```
+
+**Security features:**
+- ✅ Can only cancel your own requests
+- ✅ Cannot cancel if already ordered/received/complete
+- ✅ Timestamps and audit trail in mentor notes
+- ✅ Row turns gray when cancelled
+- ✅ Status set to "🚫 Cancelled"
 
 ### 📦 Order Tracking
 - `/openorders` – displays all non-received orders
@@ -71,12 +92,23 @@ Supports:
 ### 🛠 Automated Workflow
 1. Student submits `/requestpart` in Discord
 2. Apps Script creates request in Google Sheets
-3. AI enrichment extracts part details from URL
+3. **AI enrichment (Gemini)** extracts part details from URL
 4. System checks inventory for existing stock
 5. Mentor reviews and approves in Google Sheets
-6. Approved requests automatically moved to Orders sheet
-7. Order status tracked until received
-8. Denied requests flagged in `/openorders` for visibility
+6. **Student can cancel** using `/cancelrequest` (if not yet ordered)
+7. Approved requests automatically moved to Orders sheet
+8. Order status tracked until received
+9. Denied requests flagged in `/openorders` for visibility
+
+**Status workflow:**
+- **📥 Submitted** → Initial request state
+- **👀 Under Review** → Pending mentor review
+- **✅ Approved** → Auto-creates order in Orders sheet
+- **🛒 Ordered** → Tracking and ETA management
+- **📦 Received** → Auto-adds to inventory with location prompt
+- **✔️ Complete** → Marks request as done, grays out row
+- **❌ Denied** → Prompts for reason, highlights row red
+- **🚫 Cancelled** → Student-initiated cancellation, grays out row
 
 ---
 
@@ -85,23 +117,24 @@ Supports:
 Discord Slash Commands
         ↓
 Node.js Discord Bot (bot.js)
-  - Command handling
+  - Command handling (/requestpart, /cancelrequest, etc.)
   - User interaction
   - HTTP requests to Apps Script
         ↓
 Google Apps Script Web App (Code.gs)
   - Request routing (doPost)
   - Database operations
-  - OpenAI API integration
+  - Gemini API integration
+  - Security checks (cancellation permissions)
         ↓
 Google Sheets (Database)
   - Part Requests (pending items)
   - Orders (approved/ordered items)
   - Inventory (on-hand stock)
         ↓
-OpenAI API (gpt-4o-mini)
-  - SKU/price parsing from HTML
-  - Variant selection
+Google Gemini API (gemini-2.5-flash)
+  - Part name/SKU extraction from URLs
+  - Intelligent fallbacks for Amazon/McMaster
 ```
 
 ---
@@ -134,7 +167,7 @@ OpenAI API (gpt-4o-mini)
 ### Prerequisites
 - Google Account (for Google Sheets and Apps Script)
 - Discord Developer Account
-- OpenAI API Key (for AI enrichment)
+- Google Gemini API Key (free tier available at https://aistudio.google.com/apikey)
 - Google Cloud VM or server (for hosting the bot)
 
 ---
@@ -150,7 +183,7 @@ OpenAI API (gpt-4o-mini)
 
 #### Part Requests Sheet (Columns A-S)
 ```
-ID | Timestamp | Requester | Subsystem | Part Name | SKU | Part Link | Quantity | 
+Request ID | Timestamp | Requester | Subsystem | Part Name | SKU | Part Link | Quantity | 
 Priority | Needed By | Inventory On-Hand | Vendor Stock | Est Unit Price | 
 Total Est Cost | Max Budget | Budget Status | Request Status | Mentor Notes | 
 Expedited Shipping
@@ -163,9 +196,10 @@ Final Unit Price | Total Cost | Order Date | Shipping Method | Tracking |
 ETA | Received Date | Order Status | Mentor Notes
 ```
 
-#### Inventory Sheet (Columns A-E)
+#### Inventory Sheet (Columns A-I)
 ```
-Part Number / SKU | Vendor | Part Name | Location | Qty On-Hand
+SKU | Vendor | Part Name | Location | Qty On-Hand | Reorder Threshold | 
+Usage Rate | Last Count Date | Notes
 ```
 
 ---
@@ -180,13 +214,21 @@ Part Number / SKU | Vendor | Part Name | Location | Qty On-Hand
 5. Paste into the Apps Script editor
 6. **Save** (Ctrl+S or ⌘+S)
 
-#### Configure OpenAI API Key
+#### Configure Gemini API Key
 1. In Apps Script, go to **Project Settings** (⚙️ on left)
 2. Scroll to **Script Properties**
 3. Click **Add script property**
-   - Property: `OPENAI_API_KEY`
-   - Value: `your-openai-api-key-here`
+   - Property: `GEMINI_API_KEY`
+   - Value: `your-gemini-api-key-here` (Get from https://aistudio.google.com/apikey)
 4. Click **Save script properties**
+
+**Optional:** Configure Discord webhook for notifications
+5. Click **Add script property**
+   - Property: `DISCORD_PROCUREMENT_WEBHOOK_URL`
+   - Value: `your-discord-webhook-url`
+6. Click **Add script property** (optional)
+   - Property: `DISCORD_PROCUREMENT_ROLE_ID`
+   - Value: `your-role-id-for-pings`
 
 #### Deploy as Web App
 1. Click **Deploy → New deployment**
@@ -211,6 +253,11 @@ Open the Web app URL in your browser. You should see:
 ```
 OK FROM FRC PURCHASING WEB APP
 ```
+
+#### Setup Dropdown Workflow
+1. In Google Sheets, go to **🎃 PartBot menu → ⚙️ Setup Dropdown Workflow**
+2. Click OK
+3. This configures status dropdowns with all values including 🚫 Cancelled
 
 ---
 
@@ -376,6 +423,7 @@ pm2 logs discord-bot
 
 In your Discord server, type `/` and you should see:
 - `/requestpart`
+- `/cancelrequest`
 - `/inventory`
 - `/openorders`
 - `/orderstatus`
@@ -389,6 +437,8 @@ In your Discord server, type `/` and you should see:
 /openorders
 
 /orderstatus requestid:REQ-xxxxx
+
+/cancelrequest requestid:REQ-xxxxx reason:Testing
 ```
 
 ---
@@ -443,11 +493,35 @@ pm2 logs discord-bot
 ```
 /requestpart 
   subsystem:Drive           # Required: Drive, Intake, Shooter, etc.
-  link:https://...          # Optional: Vendor URL
+  link:https://...          # Optional: Vendor URL (triggers AI enrichment)
   qty:2                     # Optional: Quantity (default: 1)
   maxbudget:50              # Optional: Maximum budget in USD
   priority:High             # Optional: Critical, High, Medium, Low
-  notes:"0.5in bore"        # Optional: Hints for AI variant selection
+  notes:"For prototype"     # Optional: Additional context
+```
+
+**What happens:**
+1. Request created in Google Sheets
+2. AI enrichment extracts part name, SKU, price from URL
+3. Notification sent to Discord procurement channel
+4. Request ID returned (e.g., REQ-12345678)
+
+### `/cancelrequest` - Cancel Your Request (NEW!)
+```
+/cancelrequest 
+  requestid:REQ-12345678    # Required: Your request ID
+  reason:No longer needed   # Optional: Reason for cancellation
+```
+
+**Security:**
+- Can only cancel your own requests
+- Cannot cancel if status is Ordered, Received, or Complete
+- Audit trail preserved in mentor notes
+- Row turns gray, status becomes "🚫 Cancelled"
+
+**Example:**
+```
+/cancelrequest requestid:REQ-a1b2c3d4 reason:Found alternative part
 ```
 
 ### `/inventory` - Search Inventory
@@ -457,16 +531,39 @@ pm2 logs discord-bot
 /inventory search:BIN-001            # Location lookup
 ```
 
+**Returns:**
+- Part name
+- SKU
+- Vendor
+- Quantity on-hand
+- Location(s)
+
 ### `/openorders` - View Pending Orders
 ```
 /openorders                          # Shows all non-received orders
 ```
+
+**Displays:**
+- Up to 10 open orders (not yet received)
+- Up to 5 denied requests
+- Order IDs, vendors, status, ETAs
 
 ### `/orderstatus` - Check Status
 ```
 /orderstatus requestid:REQ-1fd8b811  # Request details
 /orderstatus orderid:ORD-a2b3c4d5    # Order details
 ```
+
+**Request status shows:**
+- Current status (Submitted, Approved, Ordered, etc.)
+- Part details
+- Linked orders (if any)
+
+**Order status shows:**
+- Order date
+- ETA
+- Tracking number
+- Current status
 
 ---
 
@@ -503,12 +600,27 @@ pm2 start discord-bot
 3. Verify deployment is set to "Anyone" can access
 4. Test Apps Script URL in browser (should show "OK FROM FRC PURCHASING WEB APP")
 
+### "Request not found" Error (when canceling)
+1. Verify request ID is correct (case-insensitive)
+2. Check that request exists in Part Requests sheet
+3. Run **🎃 PartBot → ⚙️ Setup Dropdown Workflow** to ensure validation includes Cancelled status
+
+### Dropdown Validation Error
+**Error:** "The data you entered in cell Q18 violates the data validation rules..."
+
+**Fix:**
+1. Run **🎃 PartBot → ⚙️ Setup Dropdown Workflow** in Google Sheets
+2. This adds "🚫 Cancelled" to the allowed status values
+
+### AI Enrichment Not Working
+1. Check **GEMINI_API_KEY** in Script Properties
+2. View Execution log: Extensions → Apps Script → Executions
+3. Try manual enrichment: Select row → **🎃 PartBot → ✨ Enrich Part Request**
+4. Check logs for specific errors
+
 ### Inventory Search Returns No Results
 1. Verify Inventory sheet has data
-2. Check column headers match exactly:
-   - `Part Number / SKU`
-   - `Part Name`
-   - `Qty On-Hand` (or similar)
+2. Check column headers match exactly
 3. Try exact SKU: `/inventory sku:WCP-0783`
 
 ---
@@ -517,7 +629,7 @@ pm2 start discord-bot
 
 ### Shared Constants
 The `shared-constants.js` file defines the API contract between bot.js and Code.gs:
-- Action names (`discordRequest`, `inventory`, etc.)
+- Action names (`discordRequest`, `inventory`, `cancelRequest`, etc.)
 - Field names for requests and responses
 - Validation limits
 - Display limits
@@ -529,7 +641,7 @@ The `shared-constants.js` file defines the API contract between bot.js and Code.
 Column positions are defined in constants at the top of Code.gs:
 ```javascript
 const PART_REQUESTS_COLS = {
-  ID: 1,
+  REQUEST_ID: 1,
   TIMESTAMP: 2,
   REQUESTER: 3,
   // ... etc
@@ -537,6 +649,22 @@ const PART_REQUESTS_COLS = {
 ```
 
 If you change column order in Google Sheets, update these constants.
+
+### Status Values
+All possible request statuses are defined in Code.gs:
+```javascript
+const STATUS = {
+  SUBMITTED: '📥 Submitted',
+  UNDER_REVIEW: '👀 Under Review',
+  APPROVED: '✅ Approved',
+  ORDERED: '🛒 Ordered',
+  RECEIVED: '📦 Received',
+  COMPLETE: '✔️ Complete',
+  DENIED: '❌ Denied',
+  ON_HOLD: '⏸️ On Hold',
+  CANCELLED: '🚫 Cancelled'
+};
+```
 
 ---
 
@@ -553,7 +681,7 @@ node_modules/
 
 ### Rotate Tokens Regularly
 - Discord bot token
-- OpenAI API key
+- Gemini API key
 - Apps Script deployment
 
 ### Restrict Apps Script Access
@@ -566,6 +694,12 @@ node_modules/
 pm2 logs discord-bot | grep ERROR
 ```
 
+### Request Cancellation Security
+- Students can only cancel their own requests
+- Cancellation blocked if already ordered/received
+- All actions logged with timestamps
+- Mentor notes preserve audit trail
+
 ### Use Environment Variables
 Never hardcode credentials in code.
 
@@ -576,18 +710,19 @@ Never hardcode credentials in code.
 ### Planned Features
 - [ ] Vendor API integrations (REV, AndyMark direct ordering)
 - [ ] Automatic cart building
-- [ ] SKU disambiguation improvements
 - [ ] Inventory QR code scanning (mobile app)
 - [ ] Budget dashboards and spending analytics
 - [ ] Web dashboard for mentors
 - [ ] Predictive part ordering based on historical data
 - [ ] Multi-team support
 - [ ] Automated reorder points for consumables
+- [x] Student self-service cancellation ✅
+- [x] AI enrichment with Gemini API ✅
 
 ### Known Issues
-- AI occasionally misidentifies SKU on multi-variant pages
+- Gemini occasionally returns incomplete data for complex product pages
 - Date formatting varies by locale
-- Rate limiting on OpenAI API (15+ concurrent requests)
+- Rate limiting on Gemini API (15 requests/minute on free tier)
 
 ---
 
@@ -616,11 +751,12 @@ node bot.js
 ## Maintainers
 
 **FRC Team 8793 – Pumpkin Bots**  
-Half Moon Bay High School
 
-- Engineering Lead: Franz Dill
-- Student Lead: TBD
-- AI Assistant: Claude (Anthropic)
+- **Head Coach & Lead Technical Mentor:** Franz Dill
+- **Team Manager:** Jennifer Dill
+- **Remote Mechanical Mentor:** Eli Dill
+- **Build Team Co-Leads:** Patton Family
+- **AI Development Assistant:** Claude (Anthropic)
 
 Contact: pumpkinbots@hmbrobotics.org
 
@@ -664,10 +800,11 @@ This requirement does **not** restrict your rights granted under the MIT License
 
 - **FIRST Robotics Competition** for inspiring innovative solutions
 - **Anthropic** for Claude AI assistance in development
-- **OpenAI** for GPT-4o-mini powering part enrichment
-- **Discord** for the platform and excellent API
+- **Google** for Gemini 2.5 Flash API powering part enrichment
 - **Google** for Apps Script and Sheets infrastructure
+- **Discord** for the platform and excellent API
 - **FRC vendor community** (REV, AndyMark, WCP, VEX) for supporting robotics education
+- **FRC Team 8793 students** for testing and feedback
 
 ---
 
