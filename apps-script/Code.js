@@ -178,6 +178,7 @@ function handleDiscordRequest_(body) {
       requester: body.requester || 'Discord User',
       subsystem: body.subsystem || '',
       partLink: body.partLink || '',
+      sku: body.sku || '',  // ← ADDED: Accept user-provided SKU
       quantity: body.quantity || 1,
       neededBy: body.neededBy || '',
       maxBudget: body.maxBudget || '',
@@ -193,7 +194,7 @@ function handleDiscordRequest_(body) {
       requester: requestData.requester,
       subsystem: requestData.subsystem,
       partName: '',
-      sku: '',
+      sku: requestData.sku || '',  // ← ADDED: Include user SKU in notification
       link: requestData.partLink,
       quantity: requestData.quantity,
       priority: requestData.priority,
@@ -239,6 +240,13 @@ function createPartRequest_(data) {
   sheet.getRange(nextRow, PART_REQUESTS_COLS.REQUESTER).setValue(data.requester);
   sheet.getRange(nextRow, PART_REQUESTS_COLS.SUBSYSTEM).setValue(data.subsystem);
   sheet.getRange(nextRow, PART_REQUESTS_COLS.PART_LINK).setValue(data.partLink);
+  
+  // ← ADDED: Write user-provided SKU if present
+  if (data.sku) {
+    sheet.getRange(nextRow, PART_REQUESTS_COLS.SKU).setValue(data.sku);
+    Logger.log('[createPartRequest_] User provided SKU: ' + data.sku);
+  }
+  
   sheet.getRange(nextRow, PART_REQUESTS_COLS.QUANTITY).setValue(data.quantity);
   sheet.getRange(nextRow, PART_REQUESTS_COLS.PRIORITY).setValue(data.priority);
   sheet.getRange(nextRow, PART_REQUESTS_COLS.NEEDED_BY).setValue(data.neededBy);
@@ -342,6 +350,11 @@ function enrichPartRequest(requestID, row) {
     Logger.log(`[enrichPartRequest] Existing Part Name: ${existingPartName}`);
     Logger.log(`[enrichPartRequest] Existing SKU: ${existingSku}`);
     
+    // ← ADDED: If user provided SKU, only enrich Part Name and Price
+    if (existingSku) {
+      Logger.log('[enrichPartRequest] User provided SKU - will only enrich Part Name and Price');
+    }
+    
     // Only enrich if we have a link and missing name/SKU
     if (!partLink || (existingPartName && existingSku)) {
       Logger.log('[enrichPartRequest] No link or already has name/SKU, skipping');
@@ -437,11 +450,14 @@ function enrichPartRequest(requestID, row) {
       Logger.log(`[enrichPartRequest] ✓ Set part name`);
     }
     
+    // ← MODIFIED: Only write SKU if user didn't provide one
     if (extracted.sku && !existingSku) {
       Logger.log(`[enrichPartRequest] Writing SKU: ${extracted.sku}`);
       sheet.getRange(row, PART_REQUESTS_COLS.SKU).setValue(extracted.sku);
       updated = true;
-      Logger.log(`[enrichPartRequest] ✓ Set SKU`);
+      Logger.log(`[enrichPartRequest] ✓ Set SKU (AI-detected)`);
+    } else if (existingSku) {
+      Logger.log(`[enrichPartRequest] Skipping SKU write - user provided: ${existingSku}`);
     }
     
     if (extracted.price) {
@@ -1051,6 +1067,123 @@ function handleOpenOrders_(body) {
 }
 
 /******************************************************
+ * CANCEL REQUEST HANDLER
+ ******************************************************/
+
+function handleCancelRequest_(body) {
+  try {
+    const requestId = (body.requestId || '').toString().trim().toUpperCase();
+    const canceller = (body.canceller || '').toString().trim();
+    const reason = (body.reason || 'No reason provided').toString().trim();
+    
+    Logger.log(`[handleCancelRequest_] Request: ${requestId}, Canceller: ${canceller}, Reason: ${reason}`);
+    
+    if (!requestId) {
+      return jsonResponse_({
+        status: 'error',
+        message: 'Request ID is required'
+      });
+    }
+    
+    const ss = SpreadsheetApp.getActive();
+    const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+    
+    if (!sheet) {
+      return jsonResponse_({
+        status: 'error',
+        message: 'Part Requests sheet not found'
+      });
+    }
+    
+    // Find the request
+    const data = sheet.getDataRange().getValues();
+    let foundRow = null;
+    let requestData = null;
+    
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      const id = (row[PART_REQUESTS_COLS.REQUEST_ID - 1] || '').toString().trim().toUpperCase();
+
+      if (id === requestId) {
+        foundRow = i + 1;
+        requestData = row;
+        break;
+      }
+    }
+    
+    if (!foundRow) {
+      return jsonResponse_({
+        status: 'error',
+        message: `Request ${requestId} not found`
+      });
+    }
+    
+    // Check if requester matches (security check)
+    const originalRequester = (requestData[PART_REQUESTS_COLS.REQUESTER - 1] || '').toString().trim();
+    if (originalRequester !== canceller) {
+      Logger.log(`[handleCancelRequest_] Permission denied: ${canceller} tried to cancel ${originalRequester}'s request`);
+      return jsonResponse_({
+        status: 'error',
+        message: `You can only cancel your own requests. This request belongs to ${originalRequester}.`
+      });
+    }
+    
+    // Check current status
+    const currentStatus = (requestData[PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString().trim();
+    
+    // Don't allow cancellation if already ordered, received, or complete
+    if (currentStatus.includes('Ordered') || 
+        currentStatus.includes('🛒') ||
+        currentStatus.includes('Received') || 
+        currentStatus.includes('📦') ||
+        currentStatus.includes('Complete') ||
+        currentStatus.includes('✔️')) {
+      return jsonResponse_({
+        status: 'error',
+        message: `Cannot cancel - request is already ${currentStatus}. Please contact a mentor.`
+      });
+    }
+    
+    // Already cancelled?
+    if (currentStatus.includes('Cancel') || currentStatus.includes('🚫')) {
+      return jsonResponse_({
+        status: 'error',
+        message: 'Request is already cancelled'
+      });
+    }
+    
+    // Update the request
+    const timestamp = new Date().toLocaleString();
+    
+    // Set status to Cancelled
+    sheet.getRange(foundRow, PART_REQUESTS_COLS.REQUEST_STATUS).setValue(STATUS.CANCELLED);
+    
+    // Update mentor notes
+    const currentNotes = sheet.getRange(foundRow, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || '';
+    const updatedNotes = currentNotes + `\n[${timestamp}] 🚫 Cancelled by ${canceller}: ${reason}`;
+    sheet.getRange(foundRow, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
+    
+    // Color the row gray to indicate cancelled
+    sheet.getRange(foundRow, 1, 1, sheet.getLastColumn()).setBackground('#e0e0e0');
+    
+    Logger.log(`[handleCancelRequest_] ${requestId} cancelled by ${canceller}`);
+    
+    return jsonResponse_({
+      status: 'ok',
+      message: 'Request cancelled successfully',
+      requestId: requestId
+    });
+    
+  } catch (err) {
+    Logger.log('[handleCancelRequest_] Error: ' + err);
+    return jsonResponse_({
+      status: 'error',
+      message: err.toString()
+    });
+  }
+}
+
+/******************************************************
  * HELPER FUNCTIONS
  ******************************************************/
 
@@ -1317,122 +1450,6 @@ function onEdit(e) {
 /******************************************************
  * DROPDOWN STATUS HANDLERS
  ******************************************************/
-/******************************************************
- * CANCEL REQUEST HANDLER
- ******************************************************/
-
-function handleCancelRequest_(body) {
-  try {
-    const requestId = (body.requestId || '').toString().trim().toUpperCase();
-    const canceller = (body.canceller || '').toString().trim();
-    const reason = (body.reason || 'No reason provided').toString().trim();
-    
-    Logger.log(`[handleCancelRequest_] Request: ${requestId}, Canceller: ${canceller}, Reason: ${reason}`);
-    
-    if (!requestId) {
-      return jsonResponse_({
-        status: 'error',
-        message: 'Request ID is required'
-      });
-    }
-    
-    const ss = SpreadsheetApp.getActive();
-    const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
-    
-    if (!sheet) {
-      return jsonResponse_({
-        status: 'error',
-        message: 'Part Requests sheet not found'
-      });
-    }
-    
-    // Find the request
-    const data = sheet.getDataRange().getValues();
-    let foundRow = null;
-    let requestData = null;
-    
-    for (let i = 1; i < data.length; i++) {
-      const row = data[i];
-      const id = (row[PART_REQUESTS_COLS.REQUEST_ID - 1] || '').toString().trim().toUpperCase();
-
-      if (id === requestId) {
-        foundRow = i + 1;
-        requestData = row;
-        break;
-      }
-    }
-    
-    if (!foundRow) {
-      return jsonResponse_({
-        status: 'error',
-        message: `Request ${requestId} not found`
-      });
-    }
-    
-    // Check if requester matches (security check)
-    const originalRequester = (requestData[PART_REQUESTS_COLS.REQUESTER - 1] || '').toString().trim();
-    if (originalRequester !== canceller) {
-      Logger.log(`[handleCancelRequest_] Permission denied: ${canceller} tried to cancel ${originalRequester}'s request`);
-      return jsonResponse_({
-        status: 'error',
-        message: `You can only cancel your own requests. This request belongs to ${originalRequester}.`
-      });
-    }
-    
-    // Check current status
-    const currentStatus = (requestData[PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString().trim();
-    
-    // Don't allow cancellation if already ordered, received, or complete
-    if (currentStatus.includes('Ordered') || 
-        currentStatus.includes('🛒') ||
-        currentStatus.includes('Received') || 
-        currentStatus.includes('📦') ||
-        currentStatus.includes('Complete') ||
-        currentStatus.includes('✔️')) {
-      return jsonResponse_({
-        status: 'error',
-        message: `Cannot cancel - request is already ${currentStatus}. Please contact a mentor.`
-      });
-    }
-    
-    // Already cancelled?
-    if (currentStatus.includes('Cancel') || currentStatus.includes('🚫')) {
-      return jsonResponse_({
-        status: 'error',
-        message: 'Request is already cancelled'
-      });
-    }
-    
-    // Update the request
-    const timestamp = new Date().toLocaleString();
-    
-    // Set status to Cancelled
-    sheet.getRange(foundRow, PART_REQUESTS_COLS.REQUEST_STATUS).setValue('🚫 Cancelled');
-    
-    // Update mentor notes
-    const currentNotes = sheet.getRange(foundRow, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || '';
-    const updatedNotes = currentNotes + `\n[${timestamp}] 🚫 Cancelled by ${canceller}: ${reason}`;
-    sheet.getRange(foundRow, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
-    
-    // Color the row gray to indicate cancelled
-    sheet.getRange(foundRow, 1, 1, sheet.getLastColumn()).setBackground('#e0e0e0');
-    
-    Logger.log(`[handleCancelRequest_] ${requestId} cancelled by ${canceller}`);
-    
-    return jsonResponse_({
-      status: 'ok',
-      message: 'Request cancelled successfully',
-      requestId: requestId
-    });
-    
-  } catch (err) {
-    Logger.log('[handleCancelRequest_] Error: ' + err);
-    return jsonResponse_({
-      status: 'error',
-      message: err.toString()
-    });
-  }
-}
 
 function handleApproved(sheet, row) {
   const ss = SpreadsheetApp.getActive();
@@ -1841,7 +1858,8 @@ function showWorkflowGuide() {
     '🛒 ORDERED → Prompts for tracking\n' +
     '📦 RECEIVED → Adds to inventory\n' +
     '✔️ COMPLETE → Marks as done\n' +
-    '❌ DENIED → Prompts for reason';
+    '❌ DENIED → Prompts for reason\n' +
+    '🚫 CANCELLED → Student cancelled';
   
   SpreadsheetApp.getUi().alert('Workflow Guide', guide, SpreadsheetApp.getUi().ButtonSet.OK);
 }

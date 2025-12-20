@@ -28,8 +28,6 @@
  */
 require('dotenv').config();
 
-require('dotenv').config();
-
 const {
   Client,
   GatewayIntentBits,
@@ -90,6 +88,9 @@ const commands = [
     .addStringOption(option =>
       option.setName('link').setDescription('Part link (URL)').setRequired(false)
     )
+    .addStringOption(option =>
+      option.setName('sku').setDescription('Specific SKU/part number (overrides AI detection)').setRequired(false)
+    )
     .addIntegerOption(option =>
       option.setName('qty').setDescription('Quantity').setRequired(false)
     )
@@ -107,6 +108,16 @@ const commands = [
     )
     .addStringOption(option =>
       option.setName('notes').setDescription('Additional notes').setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('cancelrequest')
+    .setDescription('Cancel your own part request')
+    .addStringOption(option =>
+      option.setName('requestid').setDescription('Request ID (e.g., REQ-12345678)').setRequired(true)
+    )
+    .addStringOption(option =>
+      option.setName('reason').setDescription('Reason for cancellation').setRequired(false)
     ),
 
   new SlashCommandBuilder()
@@ -131,20 +142,6 @@ const commands = [
     )
     .addStringOption(option =>
       option.setName('search').setDescription('Keyword search').setRequired(false)
-    ),
-
-  new SlashCommandBuilder()
-    .setName('cancelrequest')
-    .setDescription('Cancel your own part request')
-    .addStringOption(option =>
-      option.setName('requestid')
-        .setDescription('Request ID (e.g. REQ-12345678)')
-        .setRequired(true)
-    )
-    .addStringOption(option =>
-      option.setName('reason')
-        .setDescription('Reason for cancellation (optional)')
-        .setRequired(false)
     )
 ].map(cmd => cmd.toJSON());
 
@@ -175,6 +172,9 @@ client.on('interactionCreate', async interaction => {
       case 'requestpart':
         await handleRequestPart(interaction);
         break;
+      case 'cancelrequest':
+        await handleCancelRequest(interaction);
+        break;
       case 'inventory':
         await handleInventory(interaction);
         break;
@@ -183,9 +183,6 @@ client.on('interactionCreate', async interaction => {
         break;
       case 'openorders':
         await handleOpenOrders(interaction);
-        break;
-      case 'cancelrequest':
-        await handleCancelRequest(interaction);
         break;
     }
   } catch (err) {
@@ -202,6 +199,7 @@ client.on('interactionCreate', async interaction => {
 async function handleRequestPart(interaction) {
   const subsystem = interaction.options.getString('subsystem');
   const link = interaction.options.getString('link') || '';
+  const sku = interaction.options.getString('sku') || '';
   const qty = interaction.options.getInteger('qty') || 1;
   const maxBudget = interaction.options.getNumber('maxbudget') || '';
   const priority = interaction.options.getString('priority') || 'Medium';
@@ -215,6 +213,7 @@ async function handleRequestPart(interaction) {
       requester: interaction.user.username,
       subsystem: subsystem,
       partLink: link,
+      sku: sku,
       quantity: qty,
       neededBy: '',
       maxBudget: maxBudget,
@@ -235,12 +234,57 @@ async function handleRequestPart(interaction) {
     ];
 
     if (link) responseLines.push(`Link: ${link}`);
+    if (sku) responseLines.push(`SKU: **${sku}** (user-specified)`);
     responseLines.push(`Qty: **${qty}**, Priority: **${priority}**`);
 
     return interaction.editReply(responseLines.join('\n'));
 
   } catch (err) {
     console.error('[handleRequestPart] Error:', err.message);
+    return interaction.editReply('❌ Failed to contact Google Sheets');
+  }
+}
+
+async function handleCancelRequest(interaction) {
+  const requestId = (interaction.options.getString('requestid') || '').trim().toUpperCase();
+  const reason = (interaction.options.getString('reason') || '').trim();
+
+  if (!requestId) {
+    return interaction.reply({
+      content: '⚠️ Please provide a request ID',
+      ephemeral: true
+    });
+  }
+
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    const payload = {
+      action: 'cancelRequest',
+      requestId: requestId,
+      canceller: interaction.user.username,
+      reason: reason || 'No reason provided'
+    };
+
+    const response = await axios.post(APPS_SCRIPT_URL, payload);
+    const data = response.data;
+
+    if (data.status !== 'ok') {
+      return interaction.editReply(`❌ ${data.message || 'Unknown error'}`);
+    }
+
+    const responseLines = [
+      `✅ Request **${requestId}** cancelled successfully`,
+    ];
+
+    if (reason) {
+      responseLines.push(`Reason: ${reason}`);
+    }
+
+    return interaction.editReply(responseLines.join('\n'));
+
+  } catch (err) {
+    console.error('[handleCancelRequest] Error:', err.message);
     return interaction.editReply('❌ Failed to contact Google Sheets');
   }
 }
@@ -440,41 +484,6 @@ async function handleInventory(interaction) {
 
   } catch (err) {
     console.error('[handleInventory] Error:', err.message);
-    return interaction.editReply('❌ Failed to contact Google Sheets');
-  }
-}
-
-async function handleCancelRequest(interaction) {
-  await interaction.deferReply({ ephemeral: true });
-
-  const requestId = interaction.options.getString('requestid').trim().toUpperCase();
-  const reason = interaction.options.getString('reason') || 'No reason provided';
-  const requester = interaction.user.username;
-
-  try {
-    const payload = {
-      action: 'cancelRequest',
-      requestId: requestId,
-      canceller: requester,
-      reason: reason
-    };
-
-    const response = await axios.post(APPS_SCRIPT_URL, payload);
-    const data = response.data;
-
-    if (data.status === 'ok') {
-      return interaction.editReply(
-        `✅ **Request Cancelled**\n\n` +
-        `Request ID: ${requestId}\n` +
-        `Reason: ${reason}\n\n` +
-        `The request has been cancelled and marked in the system.`
-      );
-    } else {
-      return interaction.editReply(`❌ ${data.message || 'Failed to cancel request'}`);
-    }
-
-  } catch (err) {
-    console.error('[handleCancelRequest] Error:', err.message);
     return interaction.editReply('❌ Failed to contact Google Sheets');
   }
 }
