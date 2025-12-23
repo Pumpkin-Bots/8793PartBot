@@ -56,7 +56,8 @@ const PART_REQUESTS_COLS = {
   BUDGET_STATUS: 16,
   REQUEST_STATUS: 17,
   MENTOR_NOTES: 18,
-  EXPEDITED_SHIPPING: 19
+  EXPEDITED_SHIPPING: 19,
+  IN_INVENTORY: 20  // Formula-based indicator (read-only)
 };
 
 const ORDERS_COLS = {
@@ -1835,7 +1836,79 @@ function setupDropdownWorkflow() {
   }
   statusRange.setValues(values);
   
-  SpreadsheetApp.getUi().alert('✅ Setup Complete!', 'Dropdown workflow configured successfully!', SpreadsheetApp.getUi().ButtonSet.OK);
+  // Setup formula-based "In Inventory" column (read-only)
+  Logger.log('[setupDropdownWorkflow] Setting up In Inventory formulas...');
+  
+  for (let i = 2; i <= lastRow; i++) {
+    const statusCell = `Q${i}`;  // Request Status column
+    const notesCell = `R${i}`;   // Mentor Notes column
+    
+    // Formula checks if status is Received/Complete AND notes contain "added to inventory"
+    const formula = `=IF(OR(${statusCell}="${STATUS.RECEIVED}", ${statusCell}="${STATUS.COMPLETE}"), IF(REGEXMATCH(${notesCell}, "added to inventory"), "✅", "⚠️"), "")`;
+    
+    sheet.getRange(i, PART_REQUESTS_COLS.IN_INVENTORY).setFormula(formula);
+  }
+  
+  // Center align the indicator column
+  const indicatorRange = sheet.getRange(2, PART_REQUESTS_COLS.IN_INVENTORY, lastRow - 1, 1);
+  indicatorRange.setHorizontalAlignment('center');
+  
+  // Setup conditional formatting for visual feedback
+  setupConditionalFormatting_(sheet, lastRow);
+  
+  SpreadsheetApp.getUi().alert('✅ Setup Complete!', 'Dropdown workflow, inventory indicator, and row highlighting configured successfully!', SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+function setupConditionalFormatting_(sheet, lastRow) {
+  Logger.log('[setupConditionalFormatting_] Setting up row highlighting...');
+  
+  const range = sheet.getRange(2, 1, lastRow - 1, sheet.getMaxColumns());
+  
+  // Clear existing conditional format rules to avoid duplicates
+  sheet.clearConditionalFormatRules();
+  
+  const rules = [];
+  
+  // Rule 1: Green highlight for received + in inventory
+  const greenRule = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(`=AND($Q2="${STATUS.RECEIVED}", REGEXMATCH($R2, "added to inventory"))`)
+    .setBackground('#d9ead3')  // Light green
+    .setRanges([range])
+    .build();
+  
+  rules.push(greenRule);
+  
+  // Rule 2: Yellow warning for received but NOT in inventory
+  const yellowRule = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(`=AND($Q2="${STATUS.RECEIVED}", NOT(REGEXMATCH($R2, "added to inventory")))`)
+    .setBackground('#fff3cd')  // Light yellow warning
+    .setRanges([range])
+    .build();
+  
+  rules.push(yellowRule);
+  
+  // Rule 3: Light gray for cancelled requests
+  const grayRule = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(`=$Q2="${STATUS.CANCELLED}"`)
+    .setBackground('#f3f3f3')  // Light gray
+    .setFontColor('#666666')   // Gray text
+    .setRanges([range])
+    .build();
+  
+  rules.push(grayRule);
+  
+  // Rule 4: Light red for denied requests
+  const redRule = SpreadsheetApp.newConditionalFormatRule()
+    .whenFormulaSatisfied(`=$Q2="${STATUS.DENIED}"`)
+    .setBackground('#f4cccc')  // Light red
+    .setRanges([range])
+    .build();
+  
+  rules.push(redRule);
+  
+  sheet.setConditionalFormatRules(rules);
+  
+  Logger.log('[setupConditionalFormatting_] Conditional formatting complete');
 }
 
 function onOpen() {
@@ -1846,6 +1919,8 @@ function onOpen() {
     .addItem('📊 Show Workflow Guide', 'showWorkflowGuide')
     .addItem('🧹 Clean Up Empty Rows', 'cleanupEmptyRows')
     .addItem('✨ Enrich Part Request', 'enrichSelectedRequest')
+    .addItem('📦 Retry Add to Inventory', 'retryAddToInventory')
+    .addItem('🔍 Find Missing Inventory Items', 'findMissingInventoryItems')
     .addToUi();
 }
 
@@ -1859,7 +1934,205 @@ function showWorkflowGuide() {
     '📦 RECEIVED → Adds to inventory\n' +
     '✔️ COMPLETE → Marks as done\n' +
     '❌ DENIED → Prompts for reason\n' +
-    '🚫 CANCELLED → Student cancelled';
+    '🚫 CANCELLED → Student cancelled\n\n' +
+    '🟢 Green row = In inventory\n' +
+    '🟡 Yellow row = Missing from inventory\n' +
+    '🔴 Red row = Denied\n' +
+    '⚪ Gray row = Cancelled';
   
   SpreadsheetApp.getUi().alert('Workflow Guide', guide, SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+/******************************************************
+ * RETRY ADD TO INVENTORY (Manual Fix)
+ ******************************************************/
+
+function retryAddToInventory() {
+  const ui = SpreadsheetApp.getUi();
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getActiveSheet();
+  
+  if (sheet.getName() !== SHEET_NAMES.PART_REQUESTS) {
+    ui.alert('Please select a row in the Part Requests sheet');
+    return;
+  }
+  
+  const selection = sheet.getActiveRange();
+  const row = selection.getRow();
+  
+  if (row < 2) {
+    ui.alert('Please select a request row');
+    return;
+  }
+  
+  const status = sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_STATUS).getValue();
+  
+  if (status !== STATUS.RECEIVED && status !== STATUS.COMPLETE) {
+    ui.alert(
+      'Invalid Status',
+      'This request must be in "📦 Received" or "✔️ Complete" status to retry inventory add.',
+      ui.ButtonSet.OK
+    );
+    return;
+  }
+  
+  const requestID = sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_ID).getValue();
+  let partName = sheet.getRange(row, PART_REQUESTS_COLS.PART_NAME).getValue();
+  let sku = sheet.getRange(row, PART_REQUESTS_COLS.SKU).getValue();
+  const partLink = sheet.getRange(row, PART_REQUESTS_COLS.PART_LINK).getValue();
+  let quantity = sheet.getRange(row, PART_REQUESTS_COLS.QUANTITY).getValue();
+  const mentorNotes = sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).getValue();
+  
+  partName = partName ? partName.toString().trim() : '';
+  sku = sku ? sku.toString().trim() : '';
+  
+  if (!partName && !sku) {
+    ui.alert('Error', 'Cannot add to inventory: Missing both Part Name and SKU', ui.ButtonSet.OK);
+    return;
+  }
+  
+  if (!quantity || isNaN(parseFloat(quantity))) {
+    ui.alert('Error', 'Cannot add to inventory: Invalid quantity', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const locationResponse = ui.prompt(
+    '📦 Add to Inventory',
+    `Request: ${requestID}\n` +
+    `Part: ${partName || sku}\n` +
+    `Quantity: ${quantity}\n\n` +
+    `Enter storage location (e.g., BIN-001):`,
+    ui.ButtonSet.OK_CANCEL
+  );
+  
+  if (locationResponse.getSelectedButton() !== ui.Button.OK) {
+    return;
+  }
+  
+  const location = locationResponse.getResponseText().trim();
+  
+  if (!location) {
+    ui.alert('Error', 'Location required', ui.ButtonSet.OK);
+    return;
+  }
+  
+  const vendor = detectVendor(partLink);
+  
+  try {
+    const added = addToInventory(sku, partName, quantity, location, vendor);
+    
+    if (added) {
+      const timestamp = new Date().toLocaleDateString();
+      const updatedNotes = (mentorNotes || '') + 
+        `\n[${timestamp}] Manually added ${quantity}x to inventory at ${location}`;
+      sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
+      
+      // Formula will automatically update to show ✅
+      
+      ui.alert('✅ Success!', `Added ${quantity}x ${partName || sku} to ${location}`, ui.ButtonSet.OK);
+    }
+  } catch (err) {
+    ui.alert('❌ Error', `Failed to add to inventory:\n\n${err.toString()}`, ui.ButtonSet.OK);
+  }
+}
+
+/**
+ * Fix for validation error in "In Inventory" column
+ * Run this once to clear validation and reset formulas
+ */
+function fixInventoryColumnValidation() {
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  
+  if (!sheet) {
+    SpreadsheetApp.getUi().alert('Part Requests sheet not found');
+    return;
+  }
+  
+  const lastRow = sheet.getMaxRows();
+  const inventoryRange = sheet.getRange(2, PART_REQUESTS_COLS.IN_INVENTORY, lastRow - 1, 1);
+  
+  // Step 1: Clear any existing data validation on column T
+  inventoryRange.clearDataValidations();
+  
+  // Step 2: Clear existing content
+  inventoryRange.clearContent();
+  
+  // Step 3: Set format to plain text
+  inventoryRange.setNumberFormat('@');
+  
+  // Step 4: Re-add formulas
+  for (let i = 2; i <= lastRow; i++) {
+    const statusCell = `Q${i}`;
+    const notesCell = `R${i}`;
+    
+    const formula = `=IF(OR(${statusCell}="${STATUS.RECEIVED}", ${statusCell}="${STATUS.COMPLETE}"), IF(REGEXMATCH(${notesCell}, "added to inventory"), "✅", "⚠️"), "")`;
+    
+    sheet.getRange(i, PART_REQUESTS_COLS.IN_INVENTORY).setFormula(formula);
+  }
+  
+  // Step 5: Center align
+  inventoryRange.setHorizontalAlignment('center');
+  
+  SpreadsheetApp.getUi().alert('✅ Fixed!', 'Column T validation cleared and formulas reset. The warnings should be gone.', SpreadsheetApp.getUi().ButtonSet.OK);
+}
+
+/******************************************************
+ * FIND MISSING INVENTORY ITEMS (Diagnostic)
+ ******************************************************/
+
+function findMissingInventoryItems() {
+  const ss = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  const ui = SpreadsheetApp.getUi();
+  
+  if (!sheet) {
+    ui.alert('Part Requests sheet not found');
+    return;
+  }
+  
+  const data = sheet.getDataRange().getValues();
+  const missingItems = [];
+  
+  // Skip header row
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    const requestId = row[PART_REQUESTS_COLS.REQUEST_ID - 1];
+    const status = row[PART_REQUESTS_COLS.REQUEST_STATUS - 1];
+    const inInventory = row[PART_REQUESTS_COLS.IN_INVENTORY - 1];  // Reads formula result
+    const partName = row[PART_REQUESTS_COLS.PART_NAME - 1];
+    const sku = row[PART_REQUESTS_COLS.SKU - 1];
+    
+    // Check if status is Received or Complete but formula shows ⚠️
+    if ((status === STATUS.RECEIVED || status === STATUS.COMPLETE) && inInventory === "⚠️") {
+      missingItems.push({
+        row: i + 1,
+        requestId: requestId,
+        status: status,
+        partName: partName || sku || 'Unknown'
+      });
+    }
+  }
+  
+  if (missingItems.length === 0) {
+    ui.alert(
+      '✅ All Good!',
+      'All received items are properly added to inventory.',
+      ui.ButtonSet.OK
+    );
+  } else {
+    let message = `Found ${missingItems.length} received item(s) missing from inventory:\n\n`;
+    
+    for (const item of missingItems.slice(0, 10)) {
+      message += `• Row ${item.row}: ${item.requestId} - ${item.partName}\n`;
+    }
+    
+    if (missingItems.length > 10) {
+      message += `\n... and ${missingItems.length - 10} more.`;
+    }
+    
+    message += `\n\nUse "📦 Retry Add to Inventory" on each row to fix.`;
+    
+    ui.alert('⚠️ Missing Inventory Items', message, ui.ButtonSet.OK);
+  }
 }
