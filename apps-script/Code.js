@@ -4,27 +4,6 @@
  *
  * Licensed under the MIT License with Use Notification Requirement.
  * Full license text available in the project root LICENSE file.
- *
- * Use Notification Requirement:
- * Any team or individual who uses, copies, modifies, or distributes this
- * software must make a reasonable effort to notify FRC Team 8793 – Pumpkin
- * Bots. Notification may be sent via email (pumpkinbots@hmbrobotics.org) 
- * or by opening an issue or discussion on the project's GitHub repository. 
- * This requirement is intended to foster collaboration and does not restrict 
- * the permitted uses granted under this license.
- *
- * Permission is hereby granted, free of charge, to any person obtaining a
- * copy of this software and associated documentation files (the "Software"),
- * to use, copy, modify, merge, publish, and distribute the Software without
- * restriction, subject to the conditions above.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
- * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
- * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
- * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER
- * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
- * FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
  */
 
 /******************************************************
@@ -34,7 +13,8 @@
 const SHEET_NAMES = {
   PART_REQUESTS: 'Part Requests',
   ORDERS: 'Orders',
-  INVENTORY: 'Inventory'
+  INVENTORY: 'Inventory',
+  BUDGET: 'Budget'
 };
 
 const PART_REQUESTS_COLS = {
@@ -57,7 +37,7 @@ const PART_REQUESTS_COLS = {
   REQUEST_STATUS: 17,
   MENTOR_NOTES: 18,
   EXPEDITED_SHIPPING: 19,
-  IN_INVENTORY: 20  // Formula-based indicator (read-only)
+  IN_INVENTORY: 20
 };
 
 const ORDERS_COLS = {
@@ -143,12 +123,16 @@ function doPost(e) {
       return handleOrderStatus_(body);
     }
 
-     if (action === 'openOrders') {
+    if (action === 'openOrders') {
       return handleOpenOrders_(body);
     }
 
     if (action === 'cancelRequest') {
       return handleCancelRequest_(body);
+    }
+
+    if (action === 'budgetStatus') {
+      return handleBudgetStatus_(body);
     }
 
     return jsonResponse_({ status: 'error', message: 'Unknown action: ' + action });
@@ -179,7 +163,7 @@ function handleDiscordRequest_(body) {
       requester: body.requester || 'Discord User',
       subsystem: body.subsystem || '',
       partLink: body.partLink || '',
-      sku: body.sku || '',  // ← ADDED: Accept user-provided SKU
+      sku: body.sku || '',
       quantity: body.quantity || 1,
       neededBy: body.neededBy || '',
       maxBudget: body.maxBudget || '',
@@ -195,7 +179,7 @@ function handleDiscordRequest_(body) {
       requester: requestData.requester,
       subsystem: requestData.subsystem,
       partName: '',
-      sku: requestData.sku || '',  // ← ADDED: Include user SKU in notification
+      sku: requestData.sku || '',
       link: requestData.partLink,
       quantity: requestData.quantity,
       priority: requestData.priority,
@@ -204,9 +188,18 @@ function handleDiscordRequest_(body) {
       notes: requestData.notes
     });
 
+    // Get budget snapshot to return with response
+    let budgetSnapshot = null;
+    try {
+      budgetSnapshot = getBudgetStatus_();
+    } catch (budgetErr) {
+      Logger.log('[handleDiscordRequest_] Budget check failed (non-fatal): ' + budgetErr);
+    }
+
     return jsonResponse_({ 
       status: 'ok', 
-      requestID: requestID 
+      requestID: requestID,
+      budget: budgetSnapshot
     });
 
   } catch (err) {
@@ -242,7 +235,6 @@ function createPartRequest_(data) {
   sheet.getRange(nextRow, PART_REQUESTS_COLS.SUBSYSTEM).setValue(data.subsystem);
   sheet.getRange(nextRow, PART_REQUESTS_COLS.PART_LINK).setValue(data.partLink);
   
-  // ← ADDED: Write user-provided SKU if present
   if (data.sku) {
     sheet.getRange(nextRow, PART_REQUESTS_COLS.SKU).setValue(data.sku);
     Logger.log('[createPartRequest_] User provided SKU: ' + data.sku);
@@ -256,16 +248,21 @@ function createPartRequest_(data) {
   sheet.getRange(nextRow, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(data.notes);
   sheet.getRange(nextRow, PART_REQUESTS_COLS.EXPEDITED_SHIPPING).setValue(expeditedShipping);
   
-  // ✨ TRIGGER AI ENRICHMENT
   if (data.partLink) {
     try {
       enrichPartRequest(requestID, nextRow);
     } catch (err) {
       Logger.log('[createPartRequest_] Enrichment failed: ' + err);
-      // Don't throw - enrichment failure shouldn't break request creation
     }
   }
-  
+
+  // Write initial budget status (may be "No price yet" if enrichment pending)
+  try {
+    updateBudgetStatus_(sheet, nextRow);
+  } catch (err) {
+    Logger.log('[createPartRequest_] Budget status failed (non-fatal): ' + err);
+  }
+
   return { requestID: requestID, row: nextRow };
 }
 
@@ -327,6 +324,17 @@ function sendProcurementNotification_(request) {
   }
 }
 
+function debugBudgetV3() {
+  const ss    = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName('Budget');
+  
+  for (let i = 1; i <= 14; i++) {
+    const a = sheet.getRange('A' + i).getValue();
+    const b = sheet.getRange('B' + i).getValue();
+    Logger.log(`Row ${i}: A="${a}" | B="${b}" (type: ${typeof b})`);
+  }
+}
+
 /******************************************************
  * AI ENRICHMENT SYSTEM - Gemini API
  ******************************************************/
@@ -347,148 +355,94 @@ function enrichPartRequest(requestID, row) {
     const existingPartName = sheet.getRange(row, PART_REQUESTS_COLS.PART_NAME).getValue();
     const existingSku = sheet.getRange(row, PART_REQUESTS_COLS.SKU).getValue();
     
-    Logger.log(`[enrichPartRequest] Part Link: ${partLink}`);
-    Logger.log(`[enrichPartRequest] Existing Part Name: ${existingPartName}`);
-    Logger.log(`[enrichPartRequest] Existing SKU: ${existingSku}`);
-    
-    // ← ADDED: If user provided SKU, only enrich Part Name and Price
     if (existingSku) {
       Logger.log('[enrichPartRequest] User provided SKU - will only enrich Part Name and Price');
     }
     
-    // Only enrich if we have a link and missing name/SKU
     if (!partLink || (existingPartName && existingSku)) {
       Logger.log('[enrichPartRequest] No link or already has name/SKU, skipping');
       return;
     }
     
-    Logger.log(`[enrichPartRequest] Enriching ${requestID} with link: ${partLink}`);
-    
-    // Fetch the webpage content
-    Logger.log('[enrichPartRequest] Fetching page content...');
     const pageContent = fetchPageContent_(partLink);
     if (!pageContent) {
       Logger.log('[enrichPartRequest] ERROR: Could not fetch page content');
       return;
     }
     
-    Logger.log(`[enrichPartRequest] Got page content, length: ${pageContent.length}`);
-    Logger.log(`[enrichPartRequest] First 500 chars: ${pageContent.substring(0, 500)}`);
-    Logger.log(`[enrichPartRequest] Last 500 chars: ${pageContent.substring(Math.max(0, pageContent.length - 500))}`);
-    
-    // Extract info using Gemini
-    Logger.log('[enrichPartRequest] Calling Gemini API...');
     let extracted = extractWithGemini_(pageContent, partLink);
     
-    // If Gemini failed completely (returned null), create empty object
     if (!extracted) {
-      Logger.log('[enrichPartRequest] ERROR: Gemini extraction failed');
       extracted = { partName: null, sku: null, price: null };
-    } else {
-      Logger.log(`[enrichPartRequest] Extraction successful: ${JSON.stringify(extracted)}`);
     }
     
-    // FALLBACK: If extraction failed and it's McMaster-Carr, use SKU fallback
+    // McMaster fallback
     if ((!extracted.partName || !extracted.sku) && partLink.toLowerCase().includes('mcmaster.com')) {
-      Logger.log('[enrichPartRequest] McMaster detected - using SKU fallback');
-      
-      // Extract SKU from McMaster URL (format: mcmaster.com/XXXXYYYY or mcmaster.com/XXXX-YYYY)
       const urlMatch = partLink.match(/mcmaster\.com\/([0-9A-Z\-]+)/i);
       if (urlMatch && urlMatch[1]) {
         const mcmasterSku = urlMatch[1].toUpperCase();
-        Logger.log(`[enrichPartRequest] Extracted McMaster SKU from URL: ${mcmasterSku}`);
-        
-        // Simple fallback - just use SKU in a clean format
-        if (!extracted.partName) {
-          extracted.partName = `McMaster ${mcmasterSku}`;
-        }
-        if (!extracted.sku) {
-          extracted.sku = mcmasterSku;
-        }
-        
-        Logger.log(`[enrichPartRequest] Using McMaster fallback: ${extracted.partName}`);
+        if (!extracted.partName) extracted.partName = `McMaster ${mcmasterSku}`;
+        if (!extracted.sku) extracted.sku = mcmasterSku;
       }
     }
     
-    Logger.log(`[enrichPartRequest] Final extraction (after fallbacks): ${JSON.stringify(extracted)}`);
-    
-    // FALLBACK: Amazon - extract from URL if page fetch failed
+    // Amazon fallback
     if ((!extracted.partName || !extracted.sku) && partLink.toLowerCase().includes('amazon.com')) {
-      Logger.log('[enrichPartRequest] Amazon detected - checking for URL-based extraction');
-      
-      // Extract product name from URL slug (between product title and /dp/)
       const nameMatch = partLink.match(/amazon\.com\/([^\/]+)\/dp\//i);
       if (nameMatch && nameMatch[1]) {
         const urlSlug = decodeURIComponent(nameMatch[1].replace(/-/g, ' '));
-        Logger.log(`[enrichPartRequest] Extracted Amazon name from URL: ${urlSlug}`);
-        
         if (!extracted.partName && urlSlug.length > 3 && urlSlug.length < 150) {
           extracted.partName = urlSlug;
         }
       }
-      
-      // Extract ASIN (Amazon product ID)
       const asinMatch = partLink.match(/\/dp\/([A-Z0-9]{10})/i);
-      if (asinMatch && asinMatch[1]) {
-        const asin = asinMatch[1].toUpperCase();
-        Logger.log(`[enrichPartRequest] Extracted Amazon ASIN: ${asin}`);
-        
-        if (!extracted.sku) {
-          extracted.sku = asin;
-        }
+      if (asinMatch && asinMatch[1] && !extracted.sku) {
+        extracted.sku = asinMatch[1].toUpperCase();
       }
-      
-      Logger.log(`[enrichPartRequest] Amazon fallback result: ${JSON.stringify(extracted)}`);
     }
     
-    // Update the spreadsheet
     let updated = false;
     
     if (extracted.partName && !existingPartName) {
-      Logger.log(`[enrichPartRequest] Writing Part Name: ${extracted.partName}`);
       sheet.getRange(row, PART_REQUESTS_COLS.PART_NAME).setValue(extracted.partName);
       updated = true;
-      Logger.log(`[enrichPartRequest] ✓ Set part name`);
     }
     
-    // ← MODIFIED: Only write SKU if user didn't provide one
     if (extracted.sku && !existingSku) {
-      Logger.log(`[enrichPartRequest] Writing SKU: ${extracted.sku}`);
       sheet.getRange(row, PART_REQUESTS_COLS.SKU).setValue(extracted.sku);
       updated = true;
-      Logger.log(`[enrichPartRequest] ✓ Set SKU (AI-detected)`);
     } else if (existingSku) {
       Logger.log(`[enrichPartRequest] Skipping SKU write - user provided: ${existingSku}`);
     }
     
     if (extracted.price) {
-      Logger.log(`[enrichPartRequest] Writing Price: ${extracted.price}`);
       sheet.getRange(row, PART_REQUESTS_COLS.EST_UNIT_PRICE).setValue(extracted.price);
+      // Calculate and write Total Est Cost
+      const quantity = sheet.getRange(row, PART_REQUESTS_COLS.QUANTITY).getValue() || 1;
+      sheet.getRange(row, PART_REQUESTS_COLS.TOTAL_EST_COST).setValue(extracted.price * quantity);
       updated = true;
-      Logger.log(`[enrichPartRequest] ✓ Set price`);
     }
-    
+
     if (updated) {
-      // Update mentor notes with AI enrichment timestamp
       const timestamp = new Date().toLocaleString();
       const currentNotes = sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || '';
-      const updatedNotes = currentNotes + `\n[${timestamp}] ✨ AI enriched`;
-      Logger.log(`[enrichPartRequest] Writing mentor notes: ${updatedNotes}`);
-      sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
-      Logger.log(`[enrichPartRequest] ✓ Updated mentor notes`);
+      sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(currentNotes + `\n[${timestamp}] ✨ AI enriched`);
     }
-    
-    Logger.log(`[enrichPartRequest] ✅ Successfully enriched ${requestID}`);
+
+    // Always update budget status after enrichment (price may have changed)
+    try {
+      updateBudgetStatus_(sheet, row);
+    } catch (budgetErr) {
+      Logger.log('[enrichPartRequest] Budget status update failed (non-fatal): ' + budgetErr);
+    }
     
   } catch (err) {
     Logger.log(`[enrichPartRequest] ERROR: ${err}`);
-    Logger.log(`[enrichPartRequest] Stack: ${err.stack}`);
   }
 }
 
 function fetchPageContent_(url) {
   try {
-    // Special handling for McMaster
     const headers = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -511,40 +465,28 @@ function fetchPageContent_(url) {
     
     const html = response.getContentText();
     
-    // For McMaster, try to extract from meta tags or title before stripping HTML
     if (url.toLowerCase().includes('mcmaster.com')) {
-      Logger.log(`[fetchPageContent_] Attempting McMaster meta extraction...`);
-      
-      // Try to find product title in meta tags
       const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
       if (titleMatch && titleMatch[1]) {
         const title = titleMatch[1].trim();
-        Logger.log(`[fetchPageContent_] Found title: ${title}`);
         if (title !== 'McMaster-Carr' && !title.includes('JavaScript')) {
           return `Product Title: ${title}\n\n${html}`;
         }
       }
-      
-      // Try meta description
       const metaMatch = html.match(/<meta\s+name=["']description["']\s+content=["']([^"']+)["']/i);
       if (metaMatch && metaMatch[1]) {
-        Logger.log(`[fetchPageContent_] Found meta description: ${metaMatch[1]}`);
         return `Product: ${metaMatch[1]}\n\n${html}`;
       }
     }
     
-    // Extract text from HTML (simple version)
     let text = html
-      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '') // Remove scripts
-      .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '') // Remove styles
-      .replace(/<[^>]+>/g, ' ') // Remove HTML tags
-      .replace(/\s+/g, ' ') // Normalize whitespace
+      .replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, '')
+      .replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, '')
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
       .trim();
     
-    // Limit to first 8000 chars to stay within token limits
-    if (text.length > 8000) {
-      text = text.substring(0, 8000);
-    }
+    if (text.length > 8000) text = text.substring(0, 8000);
     
     return text;
     
@@ -554,6 +496,7 @@ function fetchPageContent_(url) {
   }
 }
 
+// ★ IMPROVED: More aggressive price extraction prompt
 function extractWithGemini_(pageContent, url) {
   try {
     const props = PropertiesService.getScriptProperties();
@@ -564,10 +507,9 @@ function extractWithGemini_(pageContent, url) {
       return null;
     }
     
-    // Detect vendor for better prompting
     const vendor = detectVendor(url);
     
-    const prompt = `You are analyzing a product page for an FRC robotics parts ordering system.
+    const prompt = `You are a price extraction specialist for an FRC robotics parts ordering system.
 
 URL: ${url}
 Vendor: ${vendor}
@@ -575,33 +517,45 @@ Vendor: ${vendor}
 Page content:
 ${pageContent}
 
-Extract the following information in JSON format:
+Extract the following in JSON format:
 {
   "partName": "the full product name/title",
   "sku": "the product SKU/part number/model number",
-  "price": "the unit price as a number (no currency symbol)"
+  "price": <unit price as a plain number, no currency symbol, no quotes>
 }
 
-Rules:
-- Part name should be descriptive but concise (under 100 chars)
-- SKU should be the vendor's part number (like "217-4583" for McMaster, "WCP-0350" for WCP)
-- Price should be numeric only (e.g., 12.99 not "$12.99")
-- If you can't find something, use null
-- Return ONLY valid JSON, no other text
+PRICE EXTRACTION RULES (critical — follow carefully):
+- Find the UNIT price (not total, not shipping)
+- Look for patterns like: "$12.99", "Price: 12.99", "USD 12.99", "12.99 each", "Add to cart $12.99"
+- For WCP/REV/AndyMark/VexPro: price is shown near "Add to Cart" button, often as "$XX.XX"
+- For McMaster-Carr: price appears near the part number, often formatted as "$XX.XX Each"
+- For Amazon: use the main displayed price (ignore "List Price" or crossed-out prices)
+- For Thrifty Bot / Redux / CTRE / Studica: look for the product price near the buy button
+- If multiple prices shown (e.g. pack pricing), use the LOWEST unit price
+- If you see a price range like "$10-$20", use the lower bound
+- ALWAYS return a number if ANY price is visible on the page
+- Only return null if absolutely no price information exists anywhere on the page
 
-JSON:`;
+PART NAME RULES:
+- Use the exact product title from the page
+- Keep it under 100 characters
+- Include key specs (size, material, quantity in pack)
+
+SKU RULES:
+- Use the vendor's part number (e.g. "WCP-0785", "REV-21-2103", "91251A537")
+- For Amazon, use the ASIN if no other SKU visible
+- For McMaster, use the catalog number from the URL or page
+
+Return ONLY valid JSON. No markdown, no explanation, no backticks.
+Example of correct output: {"partName":"WCP Flanged Bearing 1/2 Hex","sku":"WCP-0783","price":4.99}`;
     
     const apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
     
     const payload = {
-      contents: [{
-        parts: [{
-          text: prompt
-        }]
-      }],
-      generationConfig: {
+      contents: [{ parts: [{ text: prompt }] }],
+      generationConfig: { 
         temperature: 0.1,
-        maxOutputTokens: 500
+        maxOutputTokens: 1024
       }
     };
     
@@ -612,9 +566,8 @@ JSON:`;
       muteHttpExceptions: true
     });
     
-    const responseCode = response.getResponseCode();
-    if (responseCode !== 200) {
-      Logger.log(`[extractWithGemini_] API returned ${responseCode}: ${response.getContentText()}`);
+    if (response.getResponseCode() !== 200) {
+      Logger.log(`[extractWithGemini_] API returned ${response.getResponseCode()}: ${response.getContentText()}`);
       return null;
     }
     
@@ -625,54 +578,35 @@ JSON:`;
       return null;
     }
     
-    const text = data.candidates[0].content.parts[0].text;
-    Logger.log(`[extractWithGemini_] Raw response: ${text}`);
+    let jsonText = data.candidates[0].content.parts[0].text.trim();
+    Logger.log(`[extractWithGemini_] Raw response: ${jsonText}`);
     
-    // Extract JSON from response (might have markdown backticks)
-    let jsonText = text.trim();
-    if (jsonText.startsWith('```json')) {
-      jsonText = jsonText.replace(/```json\n?/g, '').replace(/```\n?/g, '');
-    } else if (jsonText.startsWith('```')) {
-      jsonText = jsonText.replace(/```\n?/g, '');
-    }
+    // Strip markdown backticks if present
+    jsonText = jsonText
+      .replace(/```json\s*/gi, '')
+      .replace(/```\s*/g, '')
+      .trim();
     
     const extracted = JSON.parse(jsonText);
-    
     Logger.log(`[extractWithGemini_] Extracted: ${JSON.stringify(extracted)}`);
     
     return {
       partName: extracted.partName || null,
-      sku: extracted.sku || null,
-      price: extracted.price ? parseFloat(extracted.price) : null
+      sku:      extracted.sku      || null,
+      price:    extracted.price    ? parseFloat(extracted.price) : null
     };
     
   } catch (err) {
     Logger.log(`[extractWithGemini_] Error: ${err}`);
-    Logger.log(`[extractWithGemini_] Stack: ${err.stack}`);
     return null;
   }
 }
 
-/**
- * Enrich Part Request with AI
- * 
- * Automatically fills in Part Name, SKU, and price from the product URL.
- * Use this feature when:
- * - A request was created before AI enrichment was enabled
- * - Enrichment failed and you want to retry
- * - You want to update enrichment data
- * 
- * How to use:
- * 1. Click on any row in the Part Requests sheet
- * 2. Go to 🎃 PartBot menu → ✨ Enrich Part Request
- * 3. AI will extract info from the Part Link column
- */
 function enrichSelectedRequest() {
   const ss = SpreadsheetApp.getActive();
   const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
   const ui = SpreadsheetApp.getUi();
   
-  // Get the currently selected row
   const selection = sheet.getActiveRange();
   if (!selection || selection.getRow() < 2) {
     ui.alert('Please select a request row first');
@@ -687,9 +621,8 @@ function enrichSelectedRequest() {
     return;
   }
   
-  ui.alert('AI Enrichment', `Enriching ${requestID}...\n\nThis will extract Part Name, SKU, and price from the product URL.`, ui.ButtonSet.OK);  
+  ui.alert('AI Enrichment', `Enriching ${requestID}...`, ui.ButtonSet.OK);
   enrichPartRequest(requestID, row);
-  
   ui.alert('✅ Done!', 'Check the spreadsheet and Execution log for results.', ui.ButtonSet.OK);
 }
 
@@ -702,16 +635,11 @@ function handleInventoryLookup_(body) {
   const inventorySheet = ss.getSheetByName(SHEET_NAMES.INVENTORY);
 
   if (!inventorySheet) {
-    return jsonResponse_({
-      status: 'error',
-      message: 'Inventory sheet not found'
-    });
+    return jsonResponse_({ status: 'error', message: 'Inventory sheet not found' });
   }
 
   const skuQuery = (body.sku || '').toString().trim();
   const searchText = (body.search || '').toString().trim();
-
-  Logger.log(`[handleInventoryLookup_] SKU: "${skuQuery}", Search: "${searchText}"`);
 
   try {
     const values = inventorySheet.getDataRange().getValues();
@@ -722,81 +650,56 @@ function handleInventoryLookup_(body) {
     const header = values[0];
     const rows = values.slice(1);
 
-    Logger.log(`[handleInventoryLookup_] Headers: ${JSON.stringify(header)}`);
-
-    const SKU_COL = findColumnIndex_(header, h => h.includes('sku') || h.includes('part number'));
+    const SKU_COL    = findColumnIndex_(header, h => h.includes('sku') || h.includes('part number'));
     const VENDOR_COL = findColumnIndex_(header, h => h.includes('vendor'));
-    const NAME_COL = findColumnIndex_(header, h => h.includes('part name'));
-    const LOC_COL = findColumnIndex_(header, h => h.includes('location'));
-    const QTY_COL = findColumnIndex_(header, h => h.includes('qty') || h.includes('on-hand'));
-
-    Logger.log(`[handleInventoryLookup_] Column indices - SKU:${SKU_COL}, VENDOR:${VENDOR_COL}, NAME:${NAME_COL}, LOC:${LOC_COL}, QTY:${QTY_COL}`);
+    const NAME_COL   = findColumnIndex_(header, h => h.includes('part name'));
+    const LOC_COL    = findColumnIndex_(header, h => h.includes('location'));
+    const QTY_COL    = findColumnIndex_(header, h => h.includes('qty') || h.includes('on-hand'));
 
     const matches = [];
 
-    // Exact SKU match
     if (skuQuery && SKU_COL !== -1) {
       const targetSku = normalizeSku(skuQuery);
-      Logger.log(`[handleInventoryLookup_] Searching for exact SKU: "${targetSku}"`);
-
       for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const rowSkuNorm = normalizeSku(row[SKU_COL]);
-
-        if (rowSkuNorm === targetSku) {
+        if (normalizeSku(rows[i][SKU_COL]) === targetSku) {
           matches.push({
-            sku: row[SKU_COL],
-            vendor: VENDOR_COL !== -1 ? row[VENDOR_COL] : '',
-            name: NAME_COL !== -1 ? row[NAME_COL] : '',
-            location: LOC_COL !== -1 ? row[LOC_COL] : '',
-            quantity: QTY_COL !== -1 ? row[QTY_COL] : ''
+            sku: rows[i][SKU_COL],
+            vendor: VENDOR_COL !== -1 ? rows[i][VENDOR_COL] : '',
+            name: NAME_COL !== -1 ? rows[i][NAME_COL] : '',
+            location: LOC_COL !== -1 ? rows[i][LOC_COL] : '',
+            quantity: QTY_COL !== -1 ? rows[i][QTY_COL] : ''
           });
         }
       }
     }
 
-    // Fuzzy search (SKU, Name, OR Location)
     const fallbackQuery = (searchText || skuQuery).toLowerCase();
-    if (matches.length === 0 && fallbackQuery && SKU_COL !== -1 && NAME_COL !== -1 && QTY_COL !== -1) {
-      Logger.log(`[handleInventoryLookup_] Doing fuzzy search for: "${fallbackQuery}"`);
-      
+    if (matches.length === 0 && fallbackQuery && SKU_COL !== -1 && NAME_COL !== -1) {
       for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
-        const rowSku = (row[SKU_COL] || '').toString().toLowerCase();
-        const rowName = (row[NAME_COL] || '').toString().toLowerCase();
-        const rowLocation = LOC_COL !== -1 ? (row[LOC_COL] || '').toString().toLowerCase() : '';
+        const rowSku      = (rows[i][SKU_COL]  || '').toString().toLowerCase();
+        const rowName     = (rows[i][NAME_COL]  || '').toString().toLowerCase();
+        const rowLocation = LOC_COL !== -1 ? (rows[i][LOC_COL] || '').toString().toLowerCase() : '';
 
-        Logger.log(`[handleInventoryLookup_] Row ${i}: SKU="${rowSku}", Name="${rowName}", Loc="${rowLocation}"`);
-
-        if (rowSku.indexOf(fallbackQuery) !== -1 || 
+        if (rowSku.indexOf(fallbackQuery) !== -1 ||
             rowName.indexOf(fallbackQuery) !== -1 ||
             rowLocation.indexOf(fallbackQuery) !== -1) {
-          
-          Logger.log(`[handleInventoryLookup_] ✓ MATCH found at row ${i}`);
-          
           matches.push({
-            sku: row[SKU_COL],
-            vendor: VENDOR_COL !== -1 ? row[VENDOR_COL] : '',
-            name: row[NAME_COL],
-            location: LOC_COL !== -1 ? row[LOC_COL] : '',
-            quantity: row[QTY_COL]
+            sku: rows[i][SKU_COL],
+            vendor: VENDOR_COL !== -1 ? rows[i][VENDOR_COL] : '',
+            name: rows[i][NAME_COL],
+            location: LOC_COL !== -1 ? rows[i][LOC_COL] : '',
+            quantity: rows[i][QTY_COL]
           });
         }
-
         if (matches.length >= 10) break;
       }
     }
-
-    Logger.log(`[handleInventoryLookup_] Found ${matches.length} matches`);
 
     return jsonResponse_({ status: 'ok', matches: matches });
 
   } catch (err) {
     Logger.log('[handleInventoryLookup_] Error: ' + err);
-    return jsonResponse_({
-      status: 'error',
-      message: err.toString()
-    });
+    return jsonResponse_({ status: 'error', message: err.toString() });
   }
 }
 
@@ -807,16 +710,13 @@ function handleInventoryLookup_(body) {
 function handleOrderStatus_(body) {
   const ss = SpreadsheetApp.getActive();
   const reqSheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
-  const ordSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
+  const ordSheet  = ss.getSheetByName(SHEET_NAMES.ORDERS);
 
   const requestId = (body.requestId || '').toString().trim();
-  const orderId = (body.orderId || '').toString().trim();
+  const orderId   = (body.orderId   || '').toString().trim();
 
   if (!requestId && !orderId) {
-    return jsonResponse_({
-      status: 'error',
-      message: 'requestId or orderId is required'
-    });
+    return jsonResponse_({ status: 'error', message: 'requestId or orderId is required' });
   }
 
   try {
@@ -832,16 +732,16 @@ function handleOrderStatus_(body) {
 
         if (id === requestId) {
           reqInfo = {
-            id: row[PART_REQUESTS_COLS.REQUEST_ID - 1],
-            timestamp: formatDateForResponse_(row[PART_REQUESTS_COLS.TIMESTAMP - 1]),
-            requester: row[PART_REQUESTS_COLS.REQUESTER - 1],
-            subsystem: row[PART_REQUESTS_COLS.SUBSYSTEM - 1],
-            partName: row[PART_REQUESTS_COLS.PART_NAME - 1],
-            sku: row[PART_REQUESTS_COLS.SKU - 1],
-            link: row[PART_REQUESTS_COLS.PART_LINK - 1],
-            qty: row[PART_REQUESTS_COLS.QUANTITY - 1],
-            priority: row[PART_REQUESTS_COLS.PRIORITY - 1],
-            neededBy: formatDateForResponse_(row[PART_REQUESTS_COLS.NEEDED_BY - 1]),
+            id:            row[PART_REQUESTS_COLS.REQUEST_ID - 1],
+            timestamp:     formatDateForResponse_(row[PART_REQUESTS_COLS.TIMESTAMP - 1]),
+            requester:     row[PART_REQUESTS_COLS.REQUESTER - 1],
+            subsystem:     row[PART_REQUESTS_COLS.SUBSYSTEM - 1],
+            partName:      row[PART_REQUESTS_COLS.PART_NAME - 1],
+            sku:           row[PART_REQUESTS_COLS.SKU - 1],
+            link:          row[PART_REQUESTS_COLS.PART_LINK - 1],
+            qty:           row[PART_REQUESTS_COLS.QUANTITY - 1],
+            priority:      row[PART_REQUESTS_COLS.PRIORITY - 1],
+            neededBy:      formatDateForResponse_(row[PART_REQUESTS_COLS.NEEDED_BY - 1]),
             requestStatus: row[PART_REQUESTS_COLS.REQUEST_STATUS - 1]
           };
           break;
@@ -849,10 +749,7 @@ function handleOrderStatus_(body) {
       }
 
       if (!reqInfo) {
-        return jsonResponse_({
-          status: 'error',
-          message: 'Request not found: ' + requestId
-        });
+        return jsonResponse_({ status: 'error', message: 'Request not found: ' + requestId });
       }
 
       result.request = reqInfo;
@@ -863,16 +760,16 @@ function handleOrderStatus_(body) {
 
         for (let i = 1; i < ovals.length; i++) {
           const row = ovals[i];
-          const includedRaw = (row[ORDERS_COLS.INCLUDED_REQUEST_IDS - 1] || '').toString();
-          const ids = includedRaw.split(',').map(s => s.trim()).filter(Boolean);
+          const ids = (row[ORDERS_COLS.INCLUDED_REQUEST_IDS - 1] || '').toString()
+            .split(',').map(s => s.trim()).filter(Boolean);
 
           if (ids.includes(requestId)) {
             linkedOrders.push({
-              orderId: row[ORDERS_COLS.ORDER_ID - 1],
-              vendor: row[ORDERS_COLS.VENDOR - 1],
-              status: row[ORDERS_COLS.ORDER_STATUS - 1],
+              orderId:   row[ORDERS_COLS.ORDER_ID - 1],
+              vendor:    row[ORDERS_COLS.VENDOR - 1],
+              status:    row[ORDERS_COLS.ORDER_STATUS - 1],
               orderDate: formatDateForResponse_(row[ORDERS_COLS.ORDER_DATE - 1]),
-              eta: formatDateForResponse_(row[ORDERS_COLS.ETA_DELIVERY - 1])
+              eta:       formatDateForResponse_(row[ORDERS_COLS.ETA_DELIVERY - 1])
             });
           }
         }
@@ -891,28 +788,25 @@ function handleOrderStatus_(body) {
 
         if (id === orderId) {
           orderInfo = {
-            orderId: row[ORDERS_COLS.ORDER_ID - 1],
+            orderId:          row[ORDERS_COLS.ORDER_ID - 1],
             includedRequests: row[ORDERS_COLS.INCLUDED_REQUEST_IDS - 1],
-            vendor: row[ORDERS_COLS.VENDOR - 1],
-            partName: row[ORDERS_COLS.PART_NAME - 1],
-            sku: row[ORDERS_COLS.SKU - 1],
-            qty: row[ORDERS_COLS.QTY_ORDERED - 1],
-            orderDate: formatDateForResponse_(row[ORDERS_COLS.ORDER_DATE - 1]),
-            shipping: row[ORDERS_COLS.SHIPPING_METHOD - 1],
-            tracking: row[ORDERS_COLS.TRACKING_NUMBER - 1],
-            eta: formatDateForResponse_(row[ORDERS_COLS.ETA_DELIVERY - 1]),
-            receivedDate: formatDateForResponse_(row[ORDERS_COLS.RECEIVED_DATE - 1]),
-            status: row[ORDERS_COLS.ORDER_STATUS - 1]
+            vendor:           row[ORDERS_COLS.VENDOR - 1],
+            partName:         row[ORDERS_COLS.PART_NAME - 1],
+            sku:              row[ORDERS_COLS.SKU - 1],
+            qty:              row[ORDERS_COLS.QTY_ORDERED - 1],
+            orderDate:        formatDateForResponse_(row[ORDERS_COLS.ORDER_DATE - 1]),
+            shipping:         row[ORDERS_COLS.SHIPPING_METHOD - 1],
+            tracking:         row[ORDERS_COLS.TRACKING_NUMBER - 1],
+            eta:              formatDateForResponse_(row[ORDERS_COLS.ETA_DELIVERY - 1]),
+            receivedDate:     formatDateForResponse_(row[ORDERS_COLS.RECEIVED_DATE - 1]),
+            status:           row[ORDERS_COLS.ORDER_STATUS - 1]
           };
           break;
         }
       }
 
       if (!orderInfo) {
-        return jsonResponse_({
-          status: 'error',
-          message: 'Order not found: ' + orderId
-        });
+        return jsonResponse_({ status: 'error', message: 'Order not found: ' + orderId });
       }
 
       result.order = orderInfo;
@@ -922,10 +816,7 @@ function handleOrderStatus_(body) {
 
   } catch (err) {
     Logger.log('[handleOrderStatus_] Error: ' + err);
-    return jsonResponse_({
-      status: 'error',
-      message: err.toString()
-    });
+    return jsonResponse_({ status: 'error', message: err.toString() });
   }
 }
 
@@ -935,135 +826,86 @@ function handleOrderStatus_(body) {
 
 function handleOpenOrders_(body) {
   const ss = SpreadsheetApp.getActive();
-  
+
   let debugSheet = ss.getSheetByName('Debug Log');
-  if (!debugSheet) {
-    debugSheet = ss.insertSheet('Debug Log');
-  }
-  
+  if (!debugSheet) debugSheet = ss.insertSheet('Debug Log');
+
   function logToSheet(message) {
-    const timestamp = new Date().toLocaleTimeString();
     const nextRow = debugSheet.getLastRow() + 1;
-    debugSheet.getRange(nextRow, 1).setValue(timestamp);
+    debugSheet.getRange(nextRow, 1).setValue(new Date().toLocaleTimeString());
     debugSheet.getRange(nextRow, 2).setValue(message);
     Logger.log(message);
   }
-  
+
   try {
     logToSheet('[START] handleOpenOrders_ called');
-    
+
     const ordSheet = ss.getSheetByName('Orders');
-    logToSheet('Orders sheet: ' + (ordSheet ? 'FOUND' : 'NOT FOUND'));
-    
     if (!ordSheet) {
-      logToSheet('[ERROR] Orders sheet not found');
-      return jsonResponse_({ 
-        status: 'error', 
-        message: 'Orders sheet not found' 
-      });
+      return jsonResponse_({ status: 'error', message: 'Orders sheet not found' });
     }
-    
+
     const ordValues = ordSheet.getDataRange().getValues();
-    logToSheet('Got ' + ordValues.length + ' rows from Orders');
-    
     const orders = [];
-    
+
     if (ordValues && ordValues.length > 1) {
-      const rows = ordValues.slice(1);
-      
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i];
+      for (let i = 1; i < ordValues.length; i++) {
+        const row = ordValues[i];
         const orderId = row[0];
-        
-        if (!orderId || orderId.toString().trim() === '') {
-          continue;
-        }
-        
-        const received = row[12];
-        const status = row[13] ? row[13].toString().trim() : '';
-        
-        const hasReceivedDate = (received !== null && received !== undefined && received !== '');
+        if (!orderId || orderId.toString().trim() === '') continue;
+
+        const received  = row[12];
+        const status    = row[13] ? row[13].toString().trim() : '';
+        const hasReceived = (received !== null && received !== undefined && received !== '');
         const isCancelled = status.toLowerCase().includes('cancel');
-        
-        if (!hasReceivedDate && !isCancelled) {
+
+        if (!hasReceived && !isCancelled) {
           orders.push({
-            orderId: orderId.toString().trim(),
+            orderId:          orderId.toString().trim(),
             includedRequests: row[1] ? row[1].toString() : '',
-            vendor: row[2] ? row[2].toString() : '',
-            partName: row[3] ? row[3].toString() : '',
-            sku: row[4] ? row[4].toString() : '',
-            qty: row[5] || '',
-            orderDate: row[8] || null,
-            shipping: row[9] ? row[9].toString() : '',
-            tracking: row[10] ? row[10].toString() : '',
-            eta: row[11] || null,
-            status: status || 'Unknown'
+            vendor:           row[2] ? row[2].toString() : '',
+            partName:         row[3] ? row[3].toString() : '',
+            sku:              row[4] ? row[4].toString() : '',
+            qty:              row[5] || '',
+            orderDate:        row[8] || null,
+            shipping:         row[9] ? row[9].toString() : '',
+            tracking:         row[10] ? row[10].toString() : '',
+            eta:              row[11] || null,
+            status:           status || 'Unknown'
           });
         }
       }
     }
-    
-    logToSheet('Found ' + orders.length + ' open orders');
-    
+
     const reqSheet = ss.getSheetByName('Part Requests');
-    logToSheet('Part Requests sheet: ' + (reqSheet ? 'FOUND' : 'NOT FOUND'));
-    
     const denied = [];
-    
+
     if (reqSheet) {
       const reqValues = reqSheet.getDataRange().getValues();
-      logToSheet('Got ' + reqValues.length + ' rows from Part Requests');
-      
       if (reqValues && reqValues.length > 1) {
-        const rRows = reqValues.slice(1);
-        
-        for (let i = 0; i < rRows.length; i++) {
-          const row = rRows[i];
-          const id = row[0];
-          
-          if (!id || id.toString().trim() === '') {
-            continue;
-          }
-          
+        for (let i = 1; i < reqValues.length; i++) {
+          const row    = reqValues[i];
+          const id     = row[0];
+          if (!id || id.toString().trim() === '') continue;
+
           const status = row[16] ? row[16].toString().trim().toLowerCase() : '';
-          
           if (status === 'denied' || status.includes('❌')) {
             denied.push({
-              id: id.toString(),
-              timestamp: row[1] || null,
-              requester: row[2] ? row[2].toString() : '',
-              subsystem: row[3] ? row[3].toString() : '',
-              partName: row[4] ? row[4].toString() : '',
-              sku: row[5] ? row[5].toString() : '',
-              link: row[6] ? row[6].toString() : '',
-              qty: row[7] || '',
-              priority: row[8] ? row[8].toString() : '',
+              id:          id.toString(),
+              requester:   row[2] ? row[2].toString() : '',
+              partName:    row[4] ? row[4].toString() : '',
               mentorNotes: row[17] ? row[17].toString() : ''
             });
           }
         }
       }
     }
-    
-    logToSheet('Found ' + denied.length + ' denied requests');
-    
-    const response = {
-      status: 'ok',
-      orders: orders,
-      denied: denied
-    };
-    
-    logToSheet('[SUCCESS] Returning response with ' + orders.length + ' orders');
-    
-    return jsonResponse_(response);
-    
+
+    return jsonResponse_({ status: 'ok', orders: orders, denied: denied });
+
   } catch (err) {
     logToSheet('[ERROR] Exception: ' + err.toString());
-    
-    return jsonResponse_({ 
-      status: 'error', 
-      message: err.toString() 
-    });
+    return jsonResponse_({ status: 'error', message: err.toString() });
   }
 }
 
@@ -1075,112 +917,72 @@ function handleCancelRequest_(body) {
   try {
     const requestId = (body.requestId || '').toString().trim().toUpperCase();
     const canceller = (body.canceller || '').toString().trim();
-    const reason = (body.reason || 'No reason provided').toString().trim();
-    
-    Logger.log(`[handleCancelRequest_] Request: ${requestId}, Canceller: ${canceller}, Reason: ${reason}`);
-    
-    if (!requestId) {
-      return jsonResponse_({
-        status: 'error',
-        message: 'Request ID is required'
-      });
-    }
-    
-    const ss = SpreadsheetApp.getActive();
-    const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
-    
-    if (!sheet) {
-      return jsonResponse_({
-        status: 'error',
-        message: 'Part Requests sheet not found'
-      });
-    }
-    
-    // Find the request
-    const data = sheet.getDataRange().getValues();
-    let foundRow = null;
-    let requestData = null;
-    
-    for (let i = 1; i < data.length; i++) {
-      const row = data[i];
-      const id = (row[PART_REQUESTS_COLS.REQUEST_ID - 1] || '').toString().trim().toUpperCase();
+    const reason    = (body.reason    || 'No reason provided').toString().trim();
 
+    if (!requestId) {
+      return jsonResponse_({ status: 'error', message: 'Request ID is required' });
+    }
+
+    const ss    = SpreadsheetApp.getActive();
+    const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+
+    if (!sheet) {
+      return jsonResponse_({ status: 'error', message: 'Part Requests sheet not found' });
+    }
+
+    const data = sheet.getDataRange().getValues();
+    let foundRow    = null;
+    let requestData = null;
+
+    for (let i = 1; i < data.length; i++) {
+      const id = (data[i][PART_REQUESTS_COLS.REQUEST_ID - 1] || '').toString().trim().toUpperCase();
       if (id === requestId) {
-        foundRow = i + 1;
-        requestData = row;
+        foundRow    = i + 1;
+        requestData = data[i];
         break;
       }
     }
-    
+
     if (!foundRow) {
-      return jsonResponse_({
-        status: 'error',
-        message: `Request ${requestId} not found`
-      });
+      return jsonResponse_({ status: 'error', message: `Request ${requestId} not found` });
     }
-    
-    // Check if requester matches (security check)
+
     const originalRequester = (requestData[PART_REQUESTS_COLS.REQUESTER - 1] || '').toString().trim();
     if (originalRequester !== canceller) {
-      Logger.log(`[handleCancelRequest_] Permission denied: ${canceller} tried to cancel ${originalRequester}'s request`);
       return jsonResponse_({
         status: 'error',
         message: `You can only cancel your own requests. This request belongs to ${originalRequester}.`
       });
     }
-    
-    // Check current status
+
     const currentStatus = (requestData[PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString().trim();
-    
-    // Don't allow cancellation if already ordered, received, or complete
-    if (currentStatus.includes('Ordered') || 
-        currentStatus.includes('🛒') ||
-        currentStatus.includes('Received') || 
-        currentStatus.includes('📦') ||
-        currentStatus.includes('Complete') ||
-        currentStatus.includes('✔️')) {
+
+    if (currentStatus.includes('Ordered') || currentStatus.includes('🛒') ||
+        currentStatus.includes('Received') || currentStatus.includes('📦') ||
+        currentStatus.includes('Complete') || currentStatus.includes('✔️')) {
       return jsonResponse_({
         status: 'error',
         message: `Cannot cancel - request is already ${currentStatus}. Please contact a mentor.`
       });
     }
-    
-    // Already cancelled?
+
     if (currentStatus.includes('Cancel') || currentStatus.includes('🚫')) {
-      return jsonResponse_({
-        status: 'error',
-        message: 'Request is already cancelled'
-      });
+      return jsonResponse_({ status: 'error', message: 'Request is already cancelled' });
     }
-    
-    // Update the request
-    const timestamp = new Date().toLocaleString();
-    
-    // Set status to Cancelled
-    sheet.getRange(foundRow, PART_REQUESTS_COLS.REQUEST_STATUS).setValue(STATUS.CANCELLED);
-    
-    // Update mentor notes
+
+    const timestamp    = new Date().toLocaleString();
     const currentNotes = sheet.getRange(foundRow, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || '';
-    const updatedNotes = currentNotes + `\n[${timestamp}] 🚫 Cancelled by ${canceller}: ${reason}`;
-    sheet.getRange(foundRow, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
-    
-    // Color the row gray to indicate cancelled
+
+    sheet.getRange(foundRow, PART_REQUESTS_COLS.REQUEST_STATUS).setValue(STATUS.CANCELLED);
+    sheet.getRange(foundRow, PART_REQUESTS_COLS.MENTOR_NOTES)
+      .setValue(currentNotes + `\n[${timestamp}] 🚫 Cancelled by ${canceller}: ${reason}`);
     sheet.getRange(foundRow, 1, 1, sheet.getLastColumn()).setBackground('#e0e0e0');
-    
-    Logger.log(`[handleCancelRequest_] ${requestId} cancelled by ${canceller}`);
-    
-    return jsonResponse_({
-      status: 'ok',
-      message: 'Request cancelled successfully',
-      requestId: requestId
-    });
-    
+
+    return jsonResponse_({ status: 'ok', message: 'Request cancelled successfully', requestId: requestId });
+
   } catch (err) {
     Logger.log('[handleCancelRequest_] Error: ' + err);
-    return jsonResponse_({
-      status: 'error',
-      message: err.toString()
-    });
+    return jsonResponse_({ status: 'error', message: err.toString() });
   }
 }
 
@@ -1189,214 +991,116 @@ function handleCancelRequest_(body) {
  ******************************************************/
 
 function normalizeSku(value) {
-  return String(value || '')
-    .trim()
-    .toLowerCase();
+  return String(value || '').trim().toLowerCase();
 }
 
 function findColumnIndex_(header, matchFn) {
   for (let i = 0; i < header.length; i++) {
-    const raw = header[i] || '';
-    const norm = raw.toString().trim().toLowerCase();
-    if (matchFn(norm)) return i;
+    if (matchFn((header[i] || '').toString().trim().toLowerCase())) return i;
   }
   return -1;
 }
 
 function formatDateForResponse_(value) {
   if (!value) return null;
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
+  if (value instanceof Date) return value.toISOString();
   const d = new Date(value);
-  if (!isNaN(d.getTime())) {
-    return d.toISOString();
-  }
+  if (!isNaN(d.getTime())) return d.toISOString();
   return value.toString();
 }
 
 function detectVendor(partLink) {
   if (!partLink) return '';
-  
   const link = partLink.toString().toLowerCase();
-  
-  if (link.includes('vexrobotics.com') || link.includes('vexpro.com')) {
-    return 'VexPro';
-  } else if (link.includes('andymark.com')) {
-    return 'AndyMark';
-  } else if (link.includes('wcproducts.com')) {
-    return 'West Coast Products';
-  } else if (link.includes('revrobotics.com')) {
-    return 'REV Robotics';
-  } else if (link.includes('amazon.com')) {
-    return 'Amazon';
-  } else if (link.includes('mcmaster.com')) {
-    return 'McMaster-Carr';
-  } else if (link.includes('thethriftybot.com')) {
-    return 'Thrifty Bot';
-  } else if (link.includes('ctr-electronics.com') || link.includes('ctre')) {
-    return 'CTRE';
-  } else if (link.includes('studica.com')) {
-    return 'Studica';
-  } else if (link.includes('reduxrobotics.com')) {
-    return 'Redux Robotics';
-  } else {
-    return 'Other';
-  }
+  if (link.includes('vexrobotics.com') || link.includes('vexpro.com')) return 'VexPro';
+  if (link.includes('andymark.com'))   return 'AndyMark';
+  if (link.includes('wcproducts.com')) return 'West Coast Products';
+  if (link.includes('revrobotics.com')) return 'REV Robotics';
+  if (link.includes('amazon.com'))     return 'Amazon';
+  if (link.includes('mcmaster.com'))   return 'McMaster-Carr';
+  if (link.includes('thethriftybot.com')) return 'Thrifty Bot';
+  if (link.includes('ctr-electronics.com') || link.includes('ctre')) return 'CTRE';
+  if (link.includes('studica.com'))    return 'Studica';
+  if (link.includes('reduxrobotics.com')) return 'Redux Robotics';
+  return 'Other';
 }
 
 function findOrderByRequestId(ordersSheet, requestID) {
   const data = ordersSheet.getDataRange().getValues();
-  
   for (let i = 1; i < data.length; i++) {
     const includedRequests = (data[i][ORDERS_COLS.INCLUDED_REQUEST_IDS - 1] || '').toString();
-    if (includedRequests.includes(requestID)) {
-      return i + 1;
-    }
+    if (includedRequests.includes(requestID)) return i + 1;
   }
-  
   return null;
 }
 
 function extractPartNameFromUrl(url) {
   if (!url) return 'Unknown Part';
-  
   try {
     const urlStr = url.toString();
-    
     if (urlStr.includes('amazon.com')) {
       const match = urlStr.match(/\/([^\/]+)\/dp\//);
-      if (match && match[1]) {
-        return decodeURIComponent(match[1].replace(/-/g, ' '));
-      }
+      if (match) return decodeURIComponent(match[1].replace(/-/g, ' '));
     }
-    
     if (urlStr.includes('mcmaster.com')) {
       const match = urlStr.match(/\/(\d+[A-Z]\d+)/);
-      if (match && match[1]) {
-        return 'McMaster ' + match[1];
-      }
+      if (match) return 'McMaster ' + match[1];
     }
-    
-    if (urlStr.includes('wcproducts.com') || urlStr.includes('westcoastproducts')) {
-      const match = urlStr.match(/\/products\/([^\/\?]+)/);
-      if (match && match[1]) {
-        return decodeURIComponent(match[1].replace(/-/g, ' '));
-      }
-    }
-    
-    if (urlStr.includes('vexrobotics.com') || urlStr.includes('vexpro.com')) {
-      const match = urlStr.match(/\/products\/([^\/\?]+)/);
-      if (match && match[1]) {
-        return 'VEX ' + decodeURIComponent(match[1].replace(/-/g, ' '));
-      }
-    }
-    
-    if (urlStr.includes('andymark.com')) {
-      const match = urlStr.match(/\/products\/([^\/\?]+)/);
-      if (match && match[1]) {
-        return 'AndyMark ' + decodeURIComponent(match[1].replace(/-/g, ' '));
-      }
-    }
-    
-    if (urlStr.includes('revrobotics.com')) {
-      const match = urlStr.match(/\/products\/([^\/\?]+)/);
-      if (match && match[1]) {
-        return 'REV ' + decodeURIComponent(match[1].replace(/-/g, ' '));
-      }
-    }
-    
+    const match = urlStr.match(/\/products\/([^\/\?]+)/);
+    if (match) return decodeURIComponent(match[1].replace(/-/g, ' '));
     const parts = urlStr.split('/').filter(p => p.length > 0);
-    if (parts.length > 0) {
-      const lastPart = parts[parts.length - 1].split('?')[0];
-      return decodeURIComponent(lastPart.replace(/[-_]/g, ' '));
-    }
-    
+    if (parts.length > 0) return decodeURIComponent(parts[parts.length - 1].split('?')[0].replace(/[-_]/g, ' '));
   } catch (e) {
     Logger.log('[extractPartNameFromUrl] Error: ' + e);
   }
-  
   return 'Part from ' + url.toString().substring(0, 50);
 }
 
 function addToInventory(sku, partName, quantity, location, vendor) {
-  Logger.log(`[addToInventory] Starting: SKU=${sku}, Part=${partName}, Qty=${quantity}, Location=${location}`);
-  
-  const ss = SpreadsheetApp.getActive();
+  const ss             = SpreadsheetApp.getActive();
   const inventorySheet = ss.getSheetByName(SHEET_NAMES.INVENTORY);
-  
-  if (!inventorySheet) {
-    Logger.log('[addToInventory] ERROR: Inventory sheet not found');
-    throw new Error('Inventory sheet not found');
-  }
-  
-  try {
-    const data = inventorySheet.getDataRange().getValues();
-    Logger.log(`[addToInventory] Inventory sheet has ${data.length} rows`);
-    
-    if (data.length < 1) {
-      Logger.log('[addToInventory] ERROR: Inventory sheet is empty');
-      throw new Error('Inventory sheet is empty');
-    }
-    
-    let existingRow = null;
-    
-    if (sku) {
-      const skuToMatch = sku.toString().toLowerCase().trim();
-      Logger.log(`[addToInventory] Searching for existing SKU: ${skuToMatch}`);
-      
-      for (let i = 1; i < data.length; i++) {
-        const rowSku = (data[i][INVENTORY_COLS.SKU - 1] || '').toString().toLowerCase().trim();
-        
-        if (rowSku && rowSku === skuToMatch) {
-          existingRow = i + 1;
-          Logger.log(`[addToInventory] Found existing item at row ${existingRow}`);
-          break;
-        }
+
+  if (!inventorySheet) throw new Error('Inventory sheet not found');
+
+  const data = inventorySheet.getDataRange().getValues();
+  let existingRow = null;
+
+  if (sku) {
+    const skuToMatch = sku.toString().toLowerCase().trim();
+    for (let i = 1; i < data.length; i++) {
+      const rowSku = (data[i][INVENTORY_COLS.SKU - 1] || '').toString().toLowerCase().trim();
+      if (rowSku && rowSku === skuToMatch) {
+        existingRow = i + 1;
+        break;
       }
     }
-    
-    if (existingRow) {
-      const currentQtyCell = inventorySheet.getRange(existingRow, INVENTORY_COLS.QTY_ON_HAND);
-      const currentQty = parseFloat(currentQtyCell.getValue()) || 0;
-      const newQty = currentQty + parseFloat(quantity);
-      
-      Logger.log(`[addToInventory] Updating quantity: ${currentQty} + ${quantity} = ${newQty}`);
-      
-      currentQtyCell.setValue(newQty);
-      inventorySheet.getRange(existingRow, INVENTORY_COLS.LAST_COUNT_DATE).setValue(new Date());
-      
-      if (location) {
-        const currentLocation = inventorySheet.getRange(existingRow, INVENTORY_COLS.LOCATION).getValue();
-        if (!currentLocation) {
-          inventorySheet.getRange(existingRow, INVENTORY_COLS.LOCATION).setValue(location);
-        } else if (currentLocation !== location && !currentLocation.includes(location)) {
-          inventorySheet.getRange(existingRow, INVENTORY_COLS.LOCATION).setValue(currentLocation + ', ' + location);
-        }
-      }
-      
-      Logger.log(`[addToInventory] SUCCESS: Updated existing item`);
-      return true;
-      
-    } else {
-      const nextRow = inventorySheet.getLastRow() + 1;
-      Logger.log(`[addToInventory] Adding new item at row ${nextRow}`);
-      
-      inventorySheet.getRange(nextRow, INVENTORY_COLS.SKU).setValue(sku || '');
-      inventorySheet.getRange(nextRow, INVENTORY_COLS.VENDOR).setValue(vendor || '');
-      inventorySheet.getRange(nextRow, INVENTORY_COLS.PART_NAME).setValue(partName || '');
-      inventorySheet.getRange(nextRow, INVENTORY_COLS.LOCATION).setValue(location);
-      inventorySheet.getRange(nextRow, INVENTORY_COLS.QTY_ON_HAND).setValue(parseFloat(quantity));
-      inventorySheet.getRange(nextRow, INVENTORY_COLS.LAST_COUNT_DATE).setValue(new Date());
-      
-      Logger.log(`[addToInventory] SUCCESS: Added new item`);
-      return true;
-    }
-    
-  } catch (err) {
-    Logger.log(`[addToInventory] ERROR: ${err}`);
-    throw err;
   }
+
+  if (existingRow) {
+    const currentQtyCell = inventorySheet.getRange(existingRow, INVENTORY_COLS.QTY_ON_HAND);
+    const currentQty     = parseFloat(currentQtyCell.getValue()) || 0;
+    currentQtyCell.setValue(currentQty + parseFloat(quantity));
+    inventorySheet.getRange(existingRow, INVENTORY_COLS.LAST_COUNT_DATE).setValue(new Date());
+
+    if (location) {
+      const currentLocation = inventorySheet.getRange(existingRow, INVENTORY_COLS.LOCATION).getValue();
+      if (!currentLocation) {
+        inventorySheet.getRange(existingRow, INVENTORY_COLS.LOCATION).setValue(location);
+      } else if (currentLocation !== location && !currentLocation.includes(location)) {
+        inventorySheet.getRange(existingRow, INVENTORY_COLS.LOCATION).setValue(currentLocation + ', ' + location);
+      }
+    }
+  } else {
+    const nextRow = inventorySheet.getLastRow() + 1;
+    inventorySheet.getRange(nextRow, INVENTORY_COLS.SKU).setValue(sku || '');
+    inventorySheet.getRange(nextRow, INVENTORY_COLS.VENDOR).setValue(vendor || '');
+    inventorySheet.getRange(nextRow, INVENTORY_COLS.PART_NAME).setValue(partName || '');
+    inventorySheet.getRange(nextRow, INVENTORY_COLS.LOCATION).setValue(location);
+    inventorySheet.getRange(nextRow, INVENTORY_COLS.QTY_ON_HAND).setValue(parseFloat(quantity));
+    inventorySheet.getRange(nextRow, INVENTORY_COLS.LAST_COUNT_DATE).setValue(new Date());
+  }
+
+  return true;
 }
 
 /******************************************************
@@ -1405,42 +1109,28 @@ function addToInventory(sku, partName, quantity, location, vendor) {
 
 function onEdit(e) {
   if (!e || !e.range) return;
-  
+
   const sheet = e.range.getSheet();
   if (sheet.getName() !== SHEET_NAMES.PART_REQUESTS) return;
-  
-  const col = e.range.getColumn();
-  if (col !== PART_REQUESTS_COLS.REQUEST_STATUS) return;
-  
+  if (e.range.getColumn() !== PART_REQUESTS_COLS.REQUEST_STATUS) return;
   if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
-  
-  const row = e.range.getRow();
+
+  const row       = e.range.getRow();
   if (row < 2) return;
-  
+
   const newStatus = e.value;
   const oldStatus = e.oldValue;
-  
   if (newStatus === oldStatus) return;
-  
+
   Logger.log(`[onEdit] Status changed on row ${row}: "${oldStatus}" → "${newStatus}"`);
-  
+
   try {
     switch (newStatus) {
-      case STATUS.APPROVED:
-        handleApproved(sheet, row);
-        break;
-      case STATUS.ORDERED:
-        handleOrdered(sheet, row);
-        break;
-      case STATUS.RECEIVED:
-        handleReceived(sheet, row);
-        break;
-      case STATUS.COMPLETE:
-        handleComplete(sheet, row);
-        break;
-      case STATUS.DENIED:
-        handleDenied(sheet, row);
-        break;
+      case STATUS.APPROVED:  handleApproved(sheet, row);  break;
+      case STATUS.ORDERED:   handleOrdered(sheet, row);   break;
+      case STATUS.RECEIVED:  handleReceived(sheet, row);  break;
+      case STATUS.COMPLETE:  handleComplete(sheet, row);  break;
+      case STATUS.DENIED:    handleDenied(sheet, row);    break;
     }
   } catch (err) {
     Logger.log(`[onEdit] Error: ${err}`);
@@ -1453,35 +1143,32 @@ function onEdit(e) {
  ******************************************************/
 
 function handleApproved(sheet, row) {
-  const ss = SpreadsheetApp.getActive();
+  const ss          = SpreadsheetApp.getActive();
   const ordersSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
-  
-  if (!ordersSheet) {
-    throw new Error('Orders sheet not found');
-  }
-  
-  const lastCol = sheet.getLastColumn();
+
+  if (!ordersSheet) throw new Error('Orders sheet not found');
+
+  const lastCol    = sheet.getLastColumn();
   const requestData = sheet.getRange(row, 1, 1, lastCol).getValues()[0];
-  
-  const requestID = requestData[PART_REQUESTS_COLS.REQUEST_ID - 1];
-  const partName = requestData[PART_REQUESTS_COLS.PART_NAME - 1];
-  const sku = requestData[PART_REQUESTS_COLS.SKU - 1];
-  const partLink = requestData[PART_REQUESTS_COLS.PART_LINK - 1];
-  const quantity = requestData[PART_REQUESTS_COLS.QUANTITY - 1];
-  const estUnitPrice = requestData[PART_REQUESTS_COLS.EST_UNIT_PRICE - 1];
-  const totalEstCost = requestData[PART_REQUESTS_COLS.TOTAL_EST_COST - 1];
+
+  const requestID       = requestData[PART_REQUESTS_COLS.REQUEST_ID - 1];
+  const partName        = requestData[PART_REQUESTS_COLS.PART_NAME - 1];
+  const sku             = requestData[PART_REQUESTS_COLS.SKU - 1];
+  const partLink        = requestData[PART_REQUESTS_COLS.PART_LINK - 1];
+  const quantity        = requestData[PART_REQUESTS_COLS.QUANTITY - 1];
+  const estUnitPrice    = requestData[PART_REQUESTS_COLS.EST_UNIT_PRICE - 1];
+  const totalEstCost    = requestData[PART_REQUESTS_COLS.TOTAL_EST_COST - 1];
   const expeditedShipping = requestData[PART_REQUESTS_COLS.EXPEDITED_SHIPPING - 1];
-  const mentorNotes = requestData[PART_REQUESTS_COLS.MENTOR_NOTES - 1];
-  
-  if (!requestID) throw new Error('No Request ID found');
-  if (!partName && !sku) throw new Error('Request must have either Part Name or SKU');
-  
-  const uuid = Utilities.getUuid().split('-')[0];
+  const mentorNotes     = requestData[PART_REQUESTS_COLS.MENTOR_NOTES - 1];
+
+  if (!requestID)           throw new Error('No Request ID found');
+  if (!partName && !sku)    throw new Error('Request must have either Part Name or SKU');
+
+  const uuid    = Utilities.getUuid().split('-')[0];
   const orderID = 'ORD-' + uuid;
-  const vendor = detectVendor(partLink);
-  
+  const vendor  = detectVendor(partLink);
   const nextOrderRow = ordersSheet.getLastRow() + 1;
-  
+
   ordersSheet.getRange(nextOrderRow, ORDERS_COLS.ORDER_ID).setValue(orderID);
   ordersSheet.getRange(nextOrderRow, ORDERS_COLS.INCLUDED_REQUEST_IDS).setValue(requestID);
   ordersSheet.getRange(nextOrderRow, ORDERS_COLS.VENDOR).setValue(vendor);
@@ -1493,18 +1180,12 @@ function handleApproved(sheet, row) {
   ordersSheet.getRange(nextOrderRow, ORDERS_COLS.SHIPPING_METHOD).setValue(expeditedShipping || 'Standard');
   ordersSheet.getRange(nextOrderRow, ORDERS_COLS.ORDER_STATUS).setValue('Approved - Not Yet Ordered');
   ordersSheet.getRange(nextOrderRow, ORDERS_COLS.MENTOR_NOTES).setValue(mentorNotes || '');
-  
-  const timestamp = new Date().toLocaleDateString();
+
+  const timestamp    = new Date().toLocaleDateString();
   const updatedNotes = (mentorNotes || '') + '\n[' + timestamp + '] Approved → ' + orderID;
   sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
-  
-  SpreadsheetApp.getActive().toast(
-    `✅ Order ${orderID} created for ${partName || sku}`,
-    '🎃 Request Approved',
-    5
-  );
-  
-  Logger.log(`[handleApproved] Created order ${orderID} for request ${requestID}`);
+
+  SpreadsheetApp.getActive().toast(`✅ Order ${orderID} created for ${partName || sku}`, '🎃 Request Approved', 5);
 }
 
 function handleOrdered(sheet, row) {
@@ -1512,225 +1193,134 @@ function handleOrdered(sheet, row) {
 }
 
 function handleReceived(sheet, row) {
-  Logger.log(`[handleReceived] ===== STARTING ROW ${row} =====`);
-  
   const ss = SpreadsheetApp.getActive();
   const ui = SpreadsheetApp.getUi();
-  
-  const requestID = sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_ID).getValue();
-  let partName = sheet.getRange(row, PART_REQUESTS_COLS.PART_NAME).getValue();
-  let sku = sheet.getRange(row, PART_REQUESTS_COLS.SKU).getValue();
-  const partLink = sheet.getRange(row, PART_REQUESTS_COLS.PART_LINK).getValue();
-  let quantity = sheet.getRange(row, PART_REQUESTS_COLS.QUANTITY).getValue();
+
+  const requestID  = sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_ID).getValue();
+  let partName     = sheet.getRange(row, PART_REQUESTS_COLS.PART_NAME).getValue();
+  let sku          = sheet.getRange(row, PART_REQUESTS_COLS.SKU).getValue();
+  const partLink   = sheet.getRange(row, PART_REQUESTS_COLS.PART_LINK).getValue();
+  let quantity     = sheet.getRange(row, PART_REQUESTS_COLS.QUANTITY).getValue();
   const mentorNotes = sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).getValue();
-  
-  Logger.log(`[handleReceived] Initial data:`);
-  Logger.log(`  Request ID: ${requestID}`);
-  Logger.log(`  Part Name: ${partName}`);
-  Logger.log(`  SKU: ${sku}`);
-  Logger.log(`  Part Link: ${partLink}`);
-  Logger.log(`  Quantity: ${quantity} (type: ${typeof quantity})`);
-  
+
   partName = partName ? partName.toString().trim() : '';
-  sku = sku ? sku.toString().trim() : '';
-  
+  sku      = sku      ? sku.toString().trim()      : '';
+
   if (!partName && !sku) {
-    Logger.log(`[handleReceived] Part Name/SKU missing, checking Orders sheet...`);
-    
     const ordersSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
     if (ordersSheet) {
       const orderRow = findOrderByRequestId(ordersSheet, requestID);
       if (orderRow) {
         partName = ordersSheet.getRange(orderRow, ORDERS_COLS.PART_NAME).getValue() || '';
-        sku = ordersSheet.getRange(orderRow, ORDERS_COLS.SKU).getValue() || '';
-        
-        if (!quantity || quantity === '' || isNaN(parseFloat(quantity))) {
+        sku      = ordersSheet.getRange(orderRow, ORDERS_COLS.SKU).getValue()       || '';
+        if (!quantity || isNaN(parseFloat(quantity))) {
           quantity = ordersSheet.getRange(orderRow, ORDERS_COLS.QTY_ORDERED).getValue();
-          Logger.log(`[handleReceived] Got quantity from order: ${quantity}`);
         }
-        
-        Logger.log(`[handleReceived] Found in Orders: Part=${partName}, SKU=${sku}, Qty=${quantity}`);
       }
     }
   }
-  
+
   if (!partName && !sku) {
-    if (partLink && partLink !== '') {
-      Logger.log(`[handleReceived] Extracting from URL...`);
+    if (partLink) {
       partName = extractPartNameFromUrl(partLink);
-      sku = partLink;
-      Logger.log(`[handleReceived] Extracted: Part=${partName}, SKU=${sku}`);
+      sku      = partLink;
     } else {
-      ui.alert(
-        'Error',
-        `Request ${requestID} has no identifiable information.\n\n` +
-        'Missing: Part Name, SKU, and Part Link\n\n' +
-        'Please fill in at least one and try again.',
-        ui.ButtonSet.OK
-      );
-      Logger.log(`[handleReceived] ERROR: No identifiable information`);
+      ui.alert('Error', `Request ${requestID} has no identifiable information.`, ui.ButtonSet.OK);
       return;
     }
   }
-  
-  Logger.log(`[handleReceived] Validating quantity: value="${quantity}", type=${typeof quantity}`);
-  
+
   let validQuantity = null;
-  
   if (quantity !== null && quantity !== undefined && quantity !== '') {
     const parsed = parseFloat(quantity);
-    Logger.log(`[handleReceived] parseFloat result: ${parsed}, isNaN: ${isNaN(parsed)}`);
-    
-    if (!isNaN(parsed) && parsed > 0) {
-      validQuantity = parsed;
-      Logger.log(`[handleReceived] Valid quantity: ${validQuantity}`);
-    }
+    if (!isNaN(parsed) && parsed > 0) validQuantity = parsed;
   }
-  
+
   if (validQuantity === null) {
-    Logger.log(`[handleReceived] Invalid quantity, prompting user...`);
-    
     const qtyResponse = ui.prompt(
       '⚠️ Quantity Issue',
-      `Request ${requestID}\n` +
-      `Part: ${partName || sku}\n\n` +
-      `The quantity field appears to be invalid or empty.\n` +
-      `Current value: "${quantity}"\n\n` +
-      `Please enter the quantity received:`,
+      `Request ${requestID}\nPart: ${partName || sku}\n\nEnter the quantity received:`,
       ui.ButtonSet.OK_CANCEL
     );
-    
-    if (qtyResponse.getSelectedButton() !== ui.Button.OK) {
-      Logger.log(`[handleReceived] User cancelled quantity prompt`);
+    if (qtyResponse.getSelectedButton() !== ui.Button.OK) return;
+    const parsedUserQty = parseFloat(qtyResponse.getResponseText().trim());
+    if (isNaN(parsedUserQty) || parsedUserQty <= 0) {
+      ui.alert('Error', 'Invalid quantity.', ui.ButtonSet.OK);
       return;
     }
-    
-    const userQty = qtyResponse.getResponseText().trim();
-    const parsedUserQty = parseFloat(userQty);
-    
-    if (!userQty || isNaN(parsedUserQty) || parsedUserQty <= 0) {
-      ui.alert(
-        'Error',
-        'Invalid quantity entered. Must be a positive number.',
-        ui.ButtonSet.OK
-      );
-      Logger.log(`[handleReceived] ERROR: User entered invalid quantity: ${userQty}`);
-      return;
-    }
-    
     validQuantity = parsedUserQty;
-    Logger.log(`[handleReceived] User entered valid quantity: ${validQuantity}`);
-    
     sheet.getRange(row, PART_REQUESTS_COLS.QUANTITY).setValue(validQuantity);
   }
-  
+
   quantity = validQuantity;
-  Logger.log(`[handleReceived] Proceeding with quantity: ${quantity}`);
-  
+
   const ordersSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
   if (ordersSheet) {
     const orderRow = findOrderByRequestId(ordersSheet, requestID);
-    
     if (orderRow) {
-      Logger.log(`[handleReceived] Found order at row ${orderRow}`);
-      
-      const today = new Date();
-      ordersSheet.getRange(orderRow, ORDERS_COLS.RECEIVED_DATE).setValue(today);
+      ordersSheet.getRange(orderRow, ORDERS_COLS.RECEIVED_DATE).setValue(new Date());
       ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_STATUS).setValue('Received');
-      
-      Logger.log(`[handleReceived] Updated order received date and status`);
-      
-      ss.toast(
-        `📦 Order marked as received on ${today.toLocaleDateString()}`,
-        'Order Updated',
-        3
-      );
-    } else {
-      Logger.log(`[handleReceived] WARNING: No order found for ${requestID}`);
     }
   }
-  
+
   const locationResponse = ui.prompt(
     '📦 Add to Inventory',
-    `Request: ${requestID}\n` +
-    `Part: ${partName || '(from link)'}\n` +
-    `SKU: ${sku || '(from link)'}\n` +
-    `Quantity: ${quantity}\n\n` +
-    `Enter storage location (e.g., BIN-001):`,
+    `Request: ${requestID}\nPart: ${partName || '(from link)'}\nSKU: ${sku || '(from link)'}\nQuantity: ${quantity}\n\nEnter storage location (e.g., BIN-001):`,
     ui.ButtonSet.OK_CANCEL
   );
-  
+
   if (locationResponse.getSelectedButton() !== ui.Button.OK) {
-    Logger.log(`[handleReceived] User cancelled location prompt`);
     ss.toast('Cancelled - Order marked received but NOT added to inventory', '⚠️ Warning', 4);
     return;
   }
-  
+
   const location = locationResponse.getResponseText().trim();
-  
   if (!location) {
-    ui.alert('Error', 'Location required. Order marked received, but not added to inventory.', ui.ButtonSet.OK);
-    Logger.log(`[handleReceived] No location provided`);
+    ui.alert('Error', 'Location required.', ui.ButtonSet.OK);
     return;
   }
-  
-  const vendor = detectVendor(partLink);
-  
+
   try {
-    const added = addToInventory(sku, partName, quantity, location, vendor);
-    
-    if (added) {
-      const timestamp = new Date().toLocaleDateString();
-      const updatedNotes = (mentorNotes || '') + 
-        `\n[${timestamp}] Received ${quantity}x, added to inventory at ${location}`;
-      sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
-      
-      ss.toast(`✅ Added ${quantity}x ${partName || sku} to ${location}`, 'Inventory Updated', 5);
-      Logger.log(`[handleReceived] ===== SUCCESS =====`);
-    }
+    addToInventory(sku, partName, quantity, location, detectVendor(partLink));
+    const timestamp    = new Date().toLocaleDateString();
+    const updatedNotes = (mentorNotes || '') + `\n[${timestamp}] Received ${quantity}x, added to inventory at ${location}`;
+    sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
+    ss.toast(`✅ Added ${quantity}x ${partName || sku} to ${location}`, 'Inventory Updated', 5);
   } catch (err) {
-    Logger.log(`[handleReceived] ERROR: ${err}`);
     ui.alert('Error', 'Order marked received, but failed to add to inventory:\n\n' + err.toString(), ui.ButtonSet.OK);
   }
 }
 
 function handleComplete(sheet, row) {
-  const timestamp = new Date().toLocaleDateString();
-  const mentorNotes = sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || '';
-  const updatedNotes = (mentorNotes || '') + '\n[' + timestamp + '] ✔️ Request complete';
-  sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
+  const timestamp    = new Date().toLocaleDateString();
+  const mentorNotes  = sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || '';
+  sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES)
+    .setValue(mentorNotes + '\n[' + timestamp + '] ✔️ Request complete');
   sheet.getRange(row, 1, 1, sheet.getLastColumn()).setBackground('#f0f0f0');
-  
   SpreadsheetApp.getActive().toast('✔️ Request marked complete', 'Success', 3);
 }
 
 function handleDenied(sheet, row) {
-  const ui = SpreadsheetApp.getUi();
+  const ui        = SpreadsheetApp.getUi();
   const requestID = sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_ID).getValue();
-  
+
   const response = ui.prompt(
     '❌ Deny Request',
     `Denying request ${requestID}\n\nPlease provide a reason:`,
     ui.ButtonSet.OK_CANCEL
   );
-  
-  if (response.getSelectedButton() !== ui.Button.OK) {
+
+  if (response.getSelectedButton() !== ui.Button.OK || !response.getResponseText().trim()) {
     sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_STATUS).setValue(STATUS.UNDER_REVIEW);
     return;
   }
-  
-  const reason = response.getResponseText();
-  if (!reason || reason.trim() === '') {
-    sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_STATUS).setValue(STATUS.UNDER_REVIEW);
-    return;
-  }
-  
-  const timestamp = new Date().toLocaleDateString();
-  const mentorNotes = sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || '';
-  const updatedNotes = (mentorNotes || '') + '\n[' + timestamp + '] ❌ DENIED: ' + reason;
-  sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
+
+  const reason       = response.getResponseText();
+  const timestamp    = new Date().toLocaleDateString();
+  const mentorNotes  = sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).getValue() || '';
+  sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES)
+    .setValue(mentorNotes + '\n[' + timestamp + '] ❌ DENIED: ' + reason);
   sheet.getRange(row, 1, 1, sheet.getLastColumn()).setBackground('#ffcccc');
-  
   SpreadsheetApp.getActive().toast(`❌ Request ${requestID} denied`, 'Request Denied', 4);
 }
 
@@ -1739,70 +1329,325 @@ function handleDenied(sheet, row) {
  ******************************************************/
 
 function cleanupEmptyRows() {
-  const ui = SpreadsheetApp.getUi();
-  const result = ui.alert(
-    '🧹 Clean Up Empty Rows',
-    'This will delete all empty rows from Orders and Part Requests sheets.\n\nThis may take a minute. Continue?',
-    ui.ButtonSet.YES_NO
-  );
-  
-  if (result !== ui.Button.YES) {
-    return;
-  }
-  
+  const ui     = SpreadsheetApp.getUi();
+  const result = ui.alert('🧹 Clean Up Empty Rows', 'Delete all empty rows? Continue?', ui.ButtonSet.YES_NO);
+  if (result !== ui.Button.YES) return;
+
   const ss = SpreadsheetApp.getActive();
-  
-  const ordSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
-  if (ordSheet) {
-    Logger.log('[cleanupEmptyRows] Cleaning Orders sheet...');
-    const lastRow = ordSheet.getMaxRows();
-    let deletedCount = 0;
-    
+
+  [SHEET_NAMES.ORDERS, SHEET_NAMES.PART_REQUESTS].forEach(sheetName => {
+    const sheet   = ss.getSheetByName(sheetName);
+    if (!sheet) return;
+    const lastRow = sheet.getMaxRows();
+    const idCol   = sheetName === SHEET_NAMES.ORDERS ? ORDERS_COLS.ORDER_ID : PART_REQUESTS_COLS.REQUEST_ID;
+
     for (let row = lastRow; row >= 2; row--) {
-      const orderId = ordSheet.getRange(row, ORDERS_COLS.ORDER_ID).getValue();
-      
-      if (!orderId || orderId.toString().trim() === '') {
-        ordSheet.deleteRow(row);
-        deletedCount++;
-        
-        if (deletedCount % 50 === 0) {
-          SpreadsheetApp.flush();
-          Logger.log(`[cleanupEmptyRows] Deleted ${deletedCount} rows so far...`);
-        }
-      }
+      const id = sheet.getRange(row, idCol).getValue();
+      if (!id || id.toString().trim() === '') sheet.deleteRow(row);
     }
-    
-    Logger.log(`[cleanupEmptyRows] Deleted ${deletedCount} empty rows from Orders`);
+  });
+
+  ui.alert('✅ Cleanup Complete!', 'Empty rows have been removed.', ui.ButtonSet.OK);
+}
+
+/******************************************************
+ * BUDGET FUNCTIONS
+ ******************************************************/
+
+function getBudgetConfig_() {
+  const ss    = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(SHEET_NAMES.BUDGET);
+
+  if (!sheet) throw new Error('Budget sheet not found.');
+
+  // Confirmed cell positions (debugBudgetV3 Aug 21 2026):
+  // B1  = Season Name
+  // B2  = Season Start
+  // B3  = Season End
+  // B6  = Total Allocated
+  // B8  = Event 1 Budget
+  // B9  = Event 2 Budget
+  // B10 = PartBot Orders Spent  ← script writes here
+  // B11 = Total Spent           ← script writes here
+  // B12 = Remaining             ← script writes here
+  // B13 = % Used                ← script writes here
+
+  const seasonName     = sheet.getRange('B1').getValue();
+  const seasonStart    = new Date(sheet.getRange('B2').getValue());
+  const seasonEnd      = new Date(sheet.getRange('B3').getValue());
+  const totalAllocated = parseFloat(sheet.getRange('B6').getValue()) || 0;
+  const event1Budget   = parseFloat(sheet.getRange('B8').getValue()) || 0;
+  const event2Budget   = parseFloat(sheet.getRange('B9').getValue()) || 0;
+  const nonPartsCost   = event1Budget + event2Budget;
+  const partsAvailable = totalAllocated - nonPartsCost;
+
+  return {
+    seasonName,
+    seasonStart,
+    seasonEnd,
+    totalAllocated,
+    event1Budget,
+    event2Budget,
+    nonPartsCost,
+    partsAvailable,
+    openingBalance: 0
+  };
+}
+
+function calculatePartBotSpend_(seasonStart, seasonEnd) {
+  const ss          = SpreadsheetApp.getActive();
+  const ordersSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
+  if (!ordersSheet) return 0;
+
+  const data       = ordersSheet.getDataRange().getValues();
+  let totalSpend   = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const row         = data[i];
+    const orderStatus = row[ORDERS_COLS.ORDER_STATUS - 1];
+    const orderDate   = new Date(row[ORDERS_COLS.ORDER_DATE - 1]);
+    const finalPrice  = parseFloat(row[ORDERS_COLS.FINAL_UNIT_PRICE - 1]) || 0;
+    const totalCost   = parseFloat(row[ORDERS_COLS.TOTAL_COST - 1])       || 0;
+    const qtyOrdered  = parseFloat(row[ORDERS_COLS.QTY_ORDERED - 1])      || 0;
+
+    const statusValue  = orderStatus ? orderStatus.toString() : '';
+    const isCountable  = [STATUS.ORDERED, STATUS.RECEIVED, STATUS.COMPLETE]
+      .some(s => statusValue === s || statusValue.includes(s.replace(/[^\w\s]/g, '').trim()));
+
+    if (!isCountable) continue;
+    if (!orderDate || isNaN(orderDate.getTime())) continue;
+    if (orderDate < seasonStart || orderDate > seasonEnd) continue;
+
+    totalSpend += totalCost > 0 ? totalCost : (finalPrice * qtyOrdered);
   }
-  
-  const reqSheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
-  if (reqSheet) {
-    Logger.log('[cleanupEmptyRows] Cleaning Part Requests sheet...');
-    const lastRow = reqSheet.getMaxRows();
-    let deletedCount = 0;
-    
-    for (let row = lastRow; row >= 2; row--) {
-      const reqId = reqSheet.getRange(row, PART_REQUESTS_COLS.REQUEST_ID).getValue();
-      
-      if (!reqId || reqId.toString().trim() === '') {
-        reqSheet.deleteRow(row);
-        deletedCount++;
-        
-        if (deletedCount % 50 === 0) {
-          SpreadsheetApp.flush();
-          Logger.log(`[cleanupEmptyRows] Deleted ${deletedCount} rows so far...`);
-        }
+
+  return totalSpend;
+}
+
+function testBudgetResponse() {
+  const result = getBudgetStatus_();
+  Logger.log(JSON.stringify(result));
+}
+
+function getBudgetStatus_() {
+  const config       = getBudgetConfig_();
+  const partBotSpend = calculatePartBotSpend_(config.seasonStart, config.seasonEnd);
+
+  // Sum all active submitted/approved requests with prices within season
+  const ss    = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+
+  const skipStatuses = [
+    STATUS.CANCELLED, STATUS.DENIED,
+    STATUS.ORDERED,   STATUS.RECEIVED, STATUS.COMPLETE
+  ];
+
+  let pendingSpend = 0;
+  if (sheet) {
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      const id      = (data[i][PART_REQUESTS_COLS.REQUEST_ID - 1]     || '').toString();
+      const status  = (data[i][PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString();
+      const ts      = data[i][PART_REQUESTS_COLS.TIMESTAMP - 1];
+      const estCost = parseFloat(data[i][PART_REQUESTS_COLS.TOTAL_EST_COST - 1]) || 0;
+
+      if (!id) continue;
+      if (skipStatuses.some(s => status === s)) continue;
+      if (estCost <= 0) continue;
+
+      // Only count requests within offseason window
+      if (ts) {
+        const reqDate = new Date(ts);
+        if (reqDate < config.seasonStart || reqDate > config.seasonEnd) continue;
       }
+
+      pendingSpend += estCost;
     }
-    
-    Logger.log(`[cleanupEmptyRows] Deleted ${deletedCount} empty rows from Part Requests`);
   }
-  
-  ui.alert(
-    '✅ Cleanup Complete!',
-    'Empty rows have been removed.',
-    ui.ButtonSet.OK
-  );
+
+  const totalPartSpend = partBotSpend + pendingSpend;
+  const totalSpent     = config.nonPartsCost + totalPartSpend;
+  const remaining      = config.totalAllocated - totalSpent;
+  const percentUsed    = config.totalAllocated > 0
+    ? (totalSpent / config.totalAllocated * 100) : 0;
+
+  // Update Budget tab calculated cells
+  try {
+    const budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET);
+    budgetSheet.getRange('B10').setValue(totalPartSpend);   // PartBot Orders Spent
+    budgetSheet.getRange('B11').setValue(totalSpent);        // Total Spent
+    budgetSheet.getRange('B12').setValue(remaining);         // Remaining
+    budgetSheet.getRange('B13').setValue(percentUsed / 100); // % Used
+  } catch (e) {
+    Logger.log('[getBudgetStatus_] Could not update Budget sheet: ' + e);
+  }
+
+  return {
+    seasonName:     config.seasonName,
+    seasonStart:    config.seasonStart.toLocaleDateString(),
+    seasonEnd:      config.seasonEnd.toLocaleDateString(),
+    totalAllocated: config.totalAllocated,
+    event1Budget:   config.event1Budget,
+    event2Budget:   config.event2Budget,
+    nonPartsCost:   config.nonPartsCost,
+    partsAvailable: config.partsAvailable,
+    partBotSpend:   totalPartSpend,
+    totalSpent:     totalSpent,
+    remaining:      remaining,
+    percentUsed:    percentUsed.toFixed(1)
+  };
+}
+
+function handleBudgetStatus_(body) {
+  try {
+    const status = getBudgetStatus_();
+    const filled = Math.min(20, Math.round(parseFloat(status.percentUsed) / 5));
+    const empty  = 20 - filled;
+    const bar    = '█'.repeat(Math.max(0, filled)) + '░'.repeat(Math.max(0, empty));
+    return jsonResponse_({ status: 'ok', budget: status, bar: bar });
+  } catch (err) {
+    Logger.log('[handleBudgetStatus_] Error: ' + err);
+    return jsonResponse_({ status: 'error', message: err.toString() });
+  }
+}
+
+function showBudgetStatus() {
+  try {
+    const status = getBudgetStatus_();
+    const filled = Math.round(parseFloat(status.percentUsed) / 5);
+    const empty  = 20 - filled;
+    const bar    = '█'.repeat(Math.max(0, filled)) + '░'.repeat(Math.max(0, empty));
+    const fmt    = v => '$' + parseFloat(v).toLocaleString('en-US', {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    });
+
+    SpreadsheetApp.getUi().alert('💰 Budget Status',
+      `Season: ${status.seasonName}\n` +
+      `${status.seasonStart} → ${status.seasonEnd}\n\n` +
+      `Total Budget:          ${fmt(status.totalAllocated)}\n` +
+      `Event 1 (non-parts):   ${fmt(status.event1Budget)}\n` +
+      `Event 2 (non-parts):   ${fmt(status.event2Budget)}\n` +
+      `PartBot Orders+Reqs:   ${fmt(status.partBotSpend)}\n` +
+      `─────────────────────────────\n` +
+      `Total Spent:           ${fmt(status.totalSpent)} (${status.percentUsed}%)\n` +
+      `Remaining:             ${fmt(status.remaining)}\n\n` +
+      `[${bar}] ${status.percentUsed}%`,
+      SpreadsheetApp.getUi().ButtonSet.OK
+    );
+  } catch (err) {
+    SpreadsheetApp.getUi().alert('❌ Error', err.toString(), SpreadsheetApp.getUi().ButtonSet.OK);
+  }
+}
+
+/******************************************************
+ * BUDGET STATUS PER REQUEST (Column P)
+ ******************************************************/
+
+function updateBudgetStatus_(sheet, row) {
+  // Single-row update — just triggers a full refresh
+  // so all rows stay consistent with each other
+  refreshAllBudgetStatuses_(sheet);
+}
+
+function refreshAllBudgetStatuses_(sheet) {
+  try {
+    const ss = SpreadsheetApp.getActive();
+    if (!sheet) sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+    if (!sheet) return;
+
+    // Get base budget
+    const config       = getBudgetConfig_();
+    const partBotSpend = calculatePartBotSpend_(config.seasonStart, config.seasonEnd);
+    const baseRemaining = config.totalAllocated - config.openingBalance - partBotSpend;
+
+    Logger.log(`[refreshAllBudgetStatuses_] Base remaining: ${baseRemaining}`);
+
+    // Read all rows
+    const data    = sheet.getDataRange().getValues();
+    const lastCol = sheet.getLastColumn();
+
+    // Skip statuses that don't consume budget
+    const skipStatuses = [
+      STATUS.CANCELLED,
+      STATUS.DENIED
+    ];
+
+    // Collect active requests with prices, sorted by timestamp
+    const activeRows = [];
+    for (let i = 1; i < data.length; i++) {
+      const id        = (data[i][PART_REQUESTS_COLS.REQUEST_ID - 1]     || '').toString();
+      const status    = (data[i][PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString();
+      const timestamp = data[i][PART_REQUESTS_COLS.TIMESTAMP - 1];
+      const estCost   = parseFloat(data[i][PART_REQUESTS_COLS.TOTAL_EST_COST - 1]) || 0;
+
+      if (!id) continue;
+      if (skipStatuses.some(s => status === s)) continue;
+
+      activeRows.push({
+        rowIndex:  i + 1,    // 1-based sheet row
+        id:        id,
+        status:    status,
+        timestamp: timestamp ? new Date(timestamp) : new Date(0),
+        estCost:   estCost
+      });
+    }
+
+    // Sort by timestamp ascending (oldest first = first to reserve budget)
+    activeRows.sort((a, b) => a.timestamp - b.timestamp);
+
+    // Calculate running budget decrement
+    let running = baseRemaining;
+
+    for (const req of activeRows) {
+      const costHere = req.estCost;
+
+      if (costHere <= 0) {
+        // No price — write placeholder
+        sheet.getRange(req.rowIndex, PART_REQUESTS_COLS.BUDGET_STATUS)
+          .setValue('⚪ No price yet');
+        continue;
+      }
+
+      running -= costHere;
+
+      const pctRemaining = config.totalAllocated > 0
+        ? (running / config.totalAllocated * 100)
+        : 100;
+
+      const fmt = v => '$' + Math.abs(v).toLocaleString('en-US', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2
+      });
+
+      let statusText;
+      if (running < 0) {
+        statusText = `🔴 -${fmt(running)} over budget`;
+      } else if (pctRemaining <= 10) {
+        statusText = `🟡 ${fmt(running)} remaining`;
+      } else {
+        statusText = `🟢 ${fmt(running)} remaining`;
+      }
+
+      sheet.getRange(req.rowIndex, PART_REQUESTS_COLS.BUDGET_STATUS)
+        .setValue(statusText);
+
+      Logger.log(`[refreshAllBudgetStatuses_] ${req.id}: -${fmt(costHere)} → ${statusText}`);
+    }
+
+  } catch (err) {
+    Logger.log('[refreshAllBudgetStatuses_] Error: ' + err);
+  }
+}
+
+// Menu-callable version
+function refreshAllBudgetStatuses() {
+  const ss    = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  const ui    = SpreadsheetApp.getUi();
+
+  refreshAllBudgetStatuses_(sheet);
+  ui.alert('✅ Done!', 'Budget status updated for all active requests.', ui.ButtonSet.OK);
 }
 
 /******************************************************
@@ -1810,122 +1655,80 @@ function cleanupEmptyRows() {
  ******************************************************/
 
 function setupDropdownWorkflow() {
-  const ss = SpreadsheetApp.getActive();
+  const ss    = SpreadsheetApp.getActive();
   const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
-  
+
   if (!sheet) {
     SpreadsheetApp.getUi().alert('Error', 'Part Requests sheet not found!', SpreadsheetApp.getUi().ButtonSet.OK);
     return;
   }
-  
+
   const statusValues = Object.values(STATUS);
   const rule = SpreadsheetApp.newDataValidation()
     .requireValueInList(statusValues, true)
     .setAllowInvalid(false)
     .build();
-  
-  const lastRow = sheet.getMaxRows();
+
+  const lastRow     = sheet.getMaxRows();
   const statusRange = sheet.getRange(2, PART_REQUESTS_COLS.REQUEST_STATUS, lastRow - 1, 1);
   statusRange.setDataValidation(rule);
-  
+
   const values = statusRange.getValues();
   for (let i = 0; i < values.length; i++) {
-    if (!values[i][0] || values[i][0] === '') {
-      values[i][0] = STATUS.SUBMITTED;
-    }
+    if (!values[i][0] || values[i][0] === '') values[i][0] = STATUS.SUBMITTED;
   }
   statusRange.setValues(values);
-  
-  // Setup formula-based "In Inventory" column (read-only)
-  Logger.log('[setupDropdownWorkflow] Setting up In Inventory formulas...');
-  
+
   for (let i = 2; i <= lastRow; i++) {
-    const statusCell = `Q${i}`;  // Request Status column
-    const notesCell = `R${i}`;   // Mentor Notes column
-    
-    // Formula checks if status is Received/Complete AND notes contain "added to inventory"
-    const formula = `=IF(OR(${statusCell}="${STATUS.RECEIVED}", ${statusCell}="${STATUS.COMPLETE}"), IF(REGEXMATCH(${notesCell}, "added to inventory"), "✅", "⚠️"), "")`;
-    
+    const formula = `=IF(OR(Q${i}="${STATUS.RECEIVED}", Q${i}="${STATUS.COMPLETE}"), IF(REGEXMATCH(R${i}, "added to inventory"), "✅", "⚠️"), "")`;
     sheet.getRange(i, PART_REQUESTS_COLS.IN_INVENTORY).setFormula(formula);
   }
-  
-  // Center align the indicator column
-  const indicatorRange = sheet.getRange(2, PART_REQUESTS_COLS.IN_INVENTORY, lastRow - 1, 1);
-  indicatorRange.setHorizontalAlignment('center');
-  
-  // Setup conditional formatting for visual feedback
+
+  sheet.getRange(2, PART_REQUESTS_COLS.IN_INVENTORY, lastRow - 1, 1).setHorizontalAlignment('center');
   setupConditionalFormatting_(sheet, lastRow);
-  
+
   SpreadsheetApp.getUi().alert('✅ Setup Complete!', 'Dropdown workflow, inventory indicator, and row highlighting configured successfully!', SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
 function setupConditionalFormatting_(sheet, lastRow) {
-  Logger.log('[setupConditionalFormatting_] Setting up row highlighting...');
-  
   const range = sheet.getRange(2, 1, lastRow - 1, sheet.getMaxColumns());
-  
-  // Clear existing conditional format rules to avoid duplicates
   sheet.clearConditionalFormatRules();
-  
-  const rules = [];
-  
-  // Rule 1: Green highlight for received + in inventory
-  const greenRule = SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied(`=AND($Q2="${STATUS.RECEIVED}", REGEXMATCH($R2, "added to inventory"))`)
-    .setBackground('#d9ead3')  // Light green
-    .setRanges([range])
-    .build();
-  
-  rules.push(greenRule);
-  
-  // Rule 2: Yellow warning for received but NOT in inventory
-  const yellowRule = SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied(`=AND($Q2="${STATUS.RECEIVED}", NOT(REGEXMATCH($R2, "added to inventory")))`)
-    .setBackground('#fff3cd')  // Light yellow warning
-    .setRanges([range])
-    .build();
-  
-  rules.push(yellowRule);
-  
-  // Rule 3: Light gray for cancelled requests
-  const grayRule = SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied(`=$Q2="${STATUS.CANCELLED}"`)
-    .setBackground('#f3f3f3')  // Light gray
-    .setFontColor('#666666')   // Gray text
-    .setRanges([range])
-    .build();
-  
-  rules.push(grayRule);
-  
-  // Rule 4: Light red for denied requests
-  const redRule = SpreadsheetApp.newConditionalFormatRule()
-    .whenFormulaSatisfied(`=$Q2="${STATUS.DENIED}"`)
-    .setBackground('#f4cccc')  // Light red
-    .setRanges([range])
-    .build();
-  
-  rules.push(redRule);
-  
+
+  const rules = [
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=AND($Q2="${STATUS.RECEIVED}", REGEXMATCH($R2, "added to inventory"))`)
+      .setBackground('#d9ead3').setRanges([range]).build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=AND($Q2="${STATUS.RECEIVED}", NOT(REGEXMATCH($R2, "added to inventory")))`)
+      .setBackground('#fff3cd').setRanges([range]).build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=$Q2="${STATUS.CANCELLED}"`)
+      .setBackground('#f3f3f3').setFontColor('#666666').setRanges([range]).build(),
+    SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=$Q2="${STATUS.DENIED}"`)
+      .setBackground('#f4cccc').setRanges([range]).build()
+  ];
+
   sheet.setConditionalFormatRules(rules);
-  
-  Logger.log('[setupConditionalFormatting_] Conditional formatting complete');
 }
 
 function onOpen() {
-  const ui = SpreadsheetApp.getUi();
-  ui.createMenu('🎃 PartBot')
-    .addItem('⚙️ Setup Dropdown Workflow', 'setupDropdownWorkflow')
+  SpreadsheetApp.getUi().createMenu('🎃 PartBot')
+    .addItem('⚙️ Setup Dropdown Workflow',       'setupDropdownWorkflow')
     .addSeparator()
-    .addItem('📊 Show Workflow Guide', 'showWorkflowGuide')
-    .addItem('🧹 Clean Up Empty Rows', 'cleanupEmptyRows')
-    .addItem('✨ Enrich Part Request', 'enrichSelectedRequest')
-    .addItem('📦 Retry Add to Inventory', 'retryAddToInventory')
-    .addItem('🔍 Find Missing Inventory Items', 'findMissingInventoryItems')
+    .addItem('📊 Show Workflow Guide',            'showWorkflowGuide')
+    .addItem('💰 Show Budget Status',             'showBudgetStatus')
+    .addSeparator()
+    .addItem('🧹 Clean Up Empty Rows',            'cleanupEmptyRows')
+    .addItem('✨ Enrich Part Request',             'enrichSelectedRequest')
+    .addItem('📦 Retry Add to Inventory',         'retryAddToInventory')
+    .addItem('🔍 Find Missing Inventory Items',   'findMissingInventoryItems')
+    .addItem('💰 Refresh All Budget Statuses',    'refreshAllBudgetStatuses')
     .addToUi();
 }
 
 function showWorkflowGuide() {
-  const guide = 
+  SpreadsheetApp.getUi().alert('Workflow Guide',
     '🎃 DROPDOWN WORKFLOW GUIDE\n\n' +
     'Just change the Status dropdown!\n\n' +
     '📥 SUBMITTED → New request\n' +
@@ -1938,9 +1741,9 @@ function showWorkflowGuide() {
     '🟢 Green row = In inventory\n' +
     '🟡 Yellow row = Missing from inventory\n' +
     '🔴 Red row = Denied\n' +
-    '⚪ Gray row = Cancelled';
-  
-  SpreadsheetApp.getUi().alert('Workflow Guide', guide, SpreadsheetApp.getUi().ButtonSet.OK);
+    '⚪ Gray row = Cancelled',
+    SpreadsheetApp.getUi().ButtonSet.OK
+  );
 }
 
 /******************************************************
@@ -1948,133 +1751,54 @@ function showWorkflowGuide() {
  ******************************************************/
 
 function retryAddToInventory() {
-  const ui = SpreadsheetApp.getUi();
-  const ss = SpreadsheetApp.getActive();
+  const ui    = SpreadsheetApp.getUi();
+  const ss    = SpreadsheetApp.getActive();
   const sheet = ss.getActiveSheet();
-  
+
   if (sheet.getName() !== SHEET_NAMES.PART_REQUESTS) {
     ui.alert('Please select a row in the Part Requests sheet');
     return;
   }
-  
-  const selection = sheet.getActiveRange();
-  const row = selection.getRow();
-  
-  if (row < 2) {
-    ui.alert('Please select a request row');
-    return;
-  }
-  
+
+  const row = sheet.getActiveRange().getRow();
+  if (row < 2) { ui.alert('Please select a request row'); return; }
+
   const status = sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_STATUS).getValue();
-  
   if (status !== STATUS.RECEIVED && status !== STATUS.COMPLETE) {
-    ui.alert(
-      'Invalid Status',
-      'This request must be in "📦 Received" or "✔️ Complete" status to retry inventory add.',
-      ui.ButtonSet.OK
-    );
+    ui.alert('Invalid Status', 'Must be "📦 Received" or "✔️ Complete".', ui.ButtonSet.OK);
     return;
   }
-  
-  const requestID = sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_ID).getValue();
-  let partName = sheet.getRange(row, PART_REQUESTS_COLS.PART_NAME).getValue();
-  let sku = sheet.getRange(row, PART_REQUESTS_COLS.SKU).getValue();
-  const partLink = sheet.getRange(row, PART_REQUESTS_COLS.PART_LINK).getValue();
-  let quantity = sheet.getRange(row, PART_REQUESTS_COLS.QUANTITY).getValue();
+
+  const requestID   = sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_ID).getValue();
+  let partName      = (sheet.getRange(row, PART_REQUESTS_COLS.PART_NAME).getValue() || '').toString().trim();
+  let sku           = (sheet.getRange(row, PART_REQUESTS_COLS.SKU).getValue()       || '').toString().trim();
+  const partLink    = sheet.getRange(row, PART_REQUESTS_COLS.PART_LINK).getValue();
+  const quantity    = sheet.getRange(row, PART_REQUESTS_COLS.QUANTITY).getValue();
   const mentorNotes = sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).getValue();
-  
-  partName = partName ? partName.toString().trim() : '';
-  sku = sku ? sku.toString().trim() : '';
-  
-  if (!partName && !sku) {
-    ui.alert('Error', 'Cannot add to inventory: Missing both Part Name and SKU', ui.ButtonSet.OK);
-    return;
-  }
-  
-  if (!quantity || isNaN(parseFloat(quantity))) {
-    ui.alert('Error', 'Cannot add to inventory: Invalid quantity', ui.ButtonSet.OK);
-    return;
-  }
-  
+
+  if (!partName && !sku) { ui.alert('Error', 'Missing both Part Name and SKU', ui.ButtonSet.OK); return; }
+  if (!quantity || isNaN(parseFloat(quantity))) { ui.alert('Error', 'Invalid quantity', ui.ButtonSet.OK); return; }
+
   const locationResponse = ui.prompt(
     '📦 Add to Inventory',
-    `Request: ${requestID}\n` +
-    `Part: ${partName || sku}\n` +
-    `Quantity: ${quantity}\n\n` +
-    `Enter storage location (e.g., BIN-001):`,
+    `Request: ${requestID}\nPart: ${partName || sku}\nQuantity: ${quantity}\n\nEnter storage location:`,
     ui.ButtonSet.OK_CANCEL
   );
-  
-  if (locationResponse.getSelectedButton() !== ui.Button.OK) {
-    return;
-  }
-  
-  const location = locationResponse.getResponseText().trim();
-  
-  if (!location) {
-    ui.alert('Error', 'Location required', ui.ButtonSet.OK);
-    return;
-  }
-  
-  const vendor = detectVendor(partLink);
-  
-  try {
-    const added = addToInventory(sku, partName, quantity, location, vendor);
-    
-    if (added) {
-      const timestamp = new Date().toLocaleDateString();
-      const updatedNotes = (mentorNotes || '') + 
-        `\n[${timestamp}] Manually added ${quantity}x to inventory at ${location}`;
-      sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
-      
-      // Formula will automatically update to show ✅
-      
-      ui.alert('✅ Success!', `Added ${quantity}x ${partName || sku} to ${location}`, ui.ButtonSet.OK);
-    }
-  } catch (err) {
-    ui.alert('❌ Error', `Failed to add to inventory:\n\n${err.toString()}`, ui.ButtonSet.OK);
-  }
-}
 
-/**
- * Fix for validation error in "In Inventory" column
- * Run this once to clear validation and reset formulas
- */
-function fixInventoryColumnValidation() {
-  const ss = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
-  
-  if (!sheet) {
-    SpreadsheetApp.getUi().alert('Part Requests sheet not found');
-    return;
+  if (locationResponse.getSelectedButton() !== ui.Button.OK) return;
+
+  const location = locationResponse.getResponseText().trim();
+  if (!location) { ui.alert('Error', 'Location required', ui.ButtonSet.OK); return; }
+
+  try {
+    addToInventory(sku, partName, quantity, location, detectVendor(partLink));
+    const timestamp    = new Date().toLocaleDateString();
+    sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES)
+      .setValue((mentorNotes || '') + `\n[${timestamp}] Manually added ${quantity}x to inventory at ${location}`);
+    ui.alert('✅ Success!', `Added ${quantity}x ${partName || sku} to ${location}`, ui.ButtonSet.OK);
+  } catch (err) {
+    ui.alert('❌ Error', err.toString(), ui.ButtonSet.OK);
   }
-  
-  const lastRow = sheet.getMaxRows();
-  const inventoryRange = sheet.getRange(2, PART_REQUESTS_COLS.IN_INVENTORY, lastRow - 1, 1);
-  
-  // Step 1: Clear any existing data validation on column T
-  inventoryRange.clearDataValidations();
-  
-  // Step 2: Clear existing content
-  inventoryRange.clearContent();
-  
-  // Step 3: Set format to plain text
-  inventoryRange.setNumberFormat('@');
-  
-  // Step 4: Re-add formulas
-  for (let i = 2; i <= lastRow; i++) {
-    const statusCell = `Q${i}`;
-    const notesCell = `R${i}`;
-    
-    const formula = `=IF(OR(${statusCell}="${STATUS.RECEIVED}", ${statusCell}="${STATUS.COMPLETE}"), IF(REGEXMATCH(${notesCell}, "added to inventory"), "✅", "⚠️"), "")`;
-    
-    sheet.getRange(i, PART_REQUESTS_COLS.IN_INVENTORY).setFormula(formula);
-  }
-  
-  // Step 5: Center align
-  inventoryRange.setHorizontalAlignment('center');
-  
-  SpreadsheetApp.getUi().alert('✅ Fixed!', 'Column T validation cleared and formulas reset. The warnings should be gone.', SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
 /******************************************************
@@ -2082,57 +1806,38 @@ function fixInventoryColumnValidation() {
  ******************************************************/
 
 function findMissingInventoryItems() {
-  const ss = SpreadsheetApp.getActive();
+  const ss    = SpreadsheetApp.getActive();
   const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
-  const ui = SpreadsheetApp.getUi();
-  
-  if (!sheet) {
-    ui.alert('Part Requests sheet not found');
-    return;
-  }
-  
-  const data = sheet.getDataRange().getValues();
+  const ui    = SpreadsheetApp.getUi();
+
+  if (!sheet) { ui.alert('Part Requests sheet not found'); return; }
+
+  const data         = sheet.getDataRange().getValues();
   const missingItems = [];
-  
-  // Skip header row
+
   for (let i = 1; i < data.length; i++) {
-    const row = data[i];
-    const requestId = row[PART_REQUESTS_COLS.REQUEST_ID - 1];
-    const status = row[PART_REQUESTS_COLS.REQUEST_STATUS - 1];
-    const inInventory = row[PART_REQUESTS_COLS.IN_INVENTORY - 1];  // Reads formula result
-    const partName = row[PART_REQUESTS_COLS.PART_NAME - 1];
-    const sku = row[PART_REQUESTS_COLS.SKU - 1];
-    
-    // Check if status is Received or Complete but formula shows ⚠️
-    if ((status === STATUS.RECEIVED || status === STATUS.COMPLETE) && inInventory === "⚠️") {
+    const row         = data[i];
+    const status      = row[PART_REQUESTS_COLS.REQUEST_STATUS - 1];
+    const inInventory = row[PART_REQUESTS_COLS.IN_INVENTORY - 1];
+
+    if ((status === STATUS.RECEIVED || status === STATUS.COMPLETE) && inInventory === '⚠️') {
       missingItems.push({
-        row: i + 1,
-        requestId: requestId,
-        status: status,
-        partName: partName || sku || 'Unknown'
+        row:       i + 1,
+        requestId: row[PART_REQUESTS_COLS.REQUEST_ID - 1],
+        partName:  row[PART_REQUESTS_COLS.PART_NAME - 1] || row[PART_REQUESTS_COLS.SKU - 1] || 'Unknown'
       });
     }
   }
-  
+
   if (missingItems.length === 0) {
-    ui.alert(
-      '✅ All Good!',
-      'All received items are properly added to inventory.',
-      ui.ButtonSet.OK
-    );
+    ui.alert('✅ All Good!', 'All received items are properly added to inventory.', ui.ButtonSet.OK);
   } else {
     let message = `Found ${missingItems.length} received item(s) missing from inventory:\n\n`;
-    
-    for (const item of missingItems.slice(0, 10)) {
+    missingItems.slice(0, 10).forEach(item => {
       message += `• Row ${item.row}: ${item.requestId} - ${item.partName}\n`;
-    }
-    
-    if (missingItems.length > 10) {
-      message += `\n... and ${missingItems.length - 10} more.`;
-    }
-    
+    });
+    if (missingItems.length > 10) message += `\n... and ${missingItems.length - 10} more.`;
     message += `\n\nUse "📦 Retry Add to Inventory" on each row to fix.`;
-    
     ui.alert('⚠️ Missing Inventory Items', message, ui.ButtonSet.OK);
   }
 }
