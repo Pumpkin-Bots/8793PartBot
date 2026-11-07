@@ -343,7 +343,7 @@ async function handleRequestBudget(interaction) {
 }
 
 async function handleBudgetStatus(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  await interaction.deferReply({ ephemeral: false });   // posted to the channel, as before
 
   try {
     const response = await axios.post(APPS_SCRIPT_URL, { action: 'budgetStatus' });
@@ -482,7 +482,12 @@ async function handleOpenOrders(interaction) {
       }
     }
 
-    return interaction.editReply(lines.join('\n'));
+    // Discord rejects messages over 2000 characters
+    let message = lines.join('\n');
+    if (message.length > 1900) {
+      message = message.substring(0, 1900) + '\n\n... (truncated)';
+    }
+    return interaction.editReply(message);
 
   } catch (err) {
     console.error('[handleOpenOrders] Error:', err.message);

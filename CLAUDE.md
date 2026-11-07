@@ -59,7 +59,8 @@ The README and older handoffs may describe `Code.gs`, `SharedConstants.gs`, `.en
 
 ## Environments and Deployment
 
-- **Discord bot VM:** `pumpkinbots@partbot`, working directory `~/8793PartBot/discord-bot/`, PM2 process `discord-bot`.
+- **Discord bot VM:** `pumpkinbots_hmbrobotics_org@discord-bot-vm`, working directory `~/8793PartBot/discord-bot/`, PM2 process `discord-bot`.
+  Until 2026-11-07 the VM ran a clone of the personal repo `pureh2oo/8793PartBot` (bot.js at the repo root, with uncommitted edits), not this repo. It was moved to a clone of `Pumpkin-Bots/8793PartBot`; the old folder is kept as `~/8793PartBot-personal` for rollback. Never embed tokens in the VM's git remote URL; this repo is public and pulls need none.
 - **Bot deployment:** commit and push locally, then on the VM pull the intended commit, restart `discord-bot`, and verify command registration in Discord.
 - **Apps Script:** project is bound to the spreadsheet. Updates have historically been copied into the browser editor. The repository now contains `.clasp.json`; verify the target and establish a safe `clasp status` / push workflow before changing how deployment is done. If `doPost` changes, deploy a new web-app version and confirm the bot points to the active deployment URL.
 - **Spreadsheet:** `8793 FullInventory and PartPurchasing`.
@@ -87,7 +88,7 @@ The verified `bot.js` registers these guild-scoped commands through `Routes.appl
 
 - `/requestpart`: subsystem, category, season (required), optional product link, SKU, quantity, max budget, priority, and notes
 - `/requestbudget`: FRC budget by line (private reply), via the `budgetStatus` action
-- `/budgetstatus`: FRC total budget, total spent, remaining $ and % (private reply), same `budgetStatus` action. It previously existed only in the VM's uncommitted `bot.js`.
+- `/budgetstatus`: FRC total budget, total spent, remaining $ and % (posted to the channel), same `budgetStatus` action
 - `/cancelrequest`: request ID and optional reason
 - `/inventory`: exact SKU or keyword search
 - `/orderstatus`: request ID or order ID

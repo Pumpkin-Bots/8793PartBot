@@ -252,7 +252,7 @@ Shows each FRC budget line (Robot Hardware & Field Pieces, Tools & Supplies, Mar
 ```
 /budgetstatus
 ```
-One-glance FRC total: budget, total spent (logged by finance + pending in PartBot), and remaining in dollars and percent. Only you see the reply.
+One-glance FRC total: budget, total spent (logged by finance + pending in PartBot), and remaining in dollars and percent. Posted to the channel.
 
 **SKU field behavior:**
 - **With SKU:** `sku:WCP-0785` → Guaranteed correct, AI skips SKU extraction
