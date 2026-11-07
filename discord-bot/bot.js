@@ -143,6 +143,10 @@ const commands = [
     .setDescription('Show the current FRC budget: spent, pending, and remaining'),
 
   new SlashCommandBuilder()
+    .setName('budgetstatus')
+    .setDescription('FRC budget summary: total budget, total spent, and remaining'),
+
+  new SlashCommandBuilder()
     .setName('cancelrequest')
     .setDescription('Cancel your own part request')
     .addStringOption(option =>
@@ -206,6 +210,9 @@ client.on('interactionCreate', async interaction => {
         break;
       case 'requestbudget':
         await handleRequestBudget(interaction);
+        break;
+      case 'budgetstatus':
+        await handleBudgetStatus(interaction);
         break;
       case 'cancelrequest':
         await handleCancelRequest(interaction);
@@ -331,6 +338,48 @@ async function handleRequestBudget(interaction) {
 
   } catch (err) {
     console.error('[handleRequestBudget] Error:', err.message);
+    return interaction.editReply('❌ Failed to contact Google Sheets');
+  }
+}
+
+async function handleBudgetStatus(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    const response = await axios.post(APPS_SCRIPT_URL, { action: 'budgetStatus' });
+    const data = response.data;
+
+    if (data.status !== 'ok') {
+      return interaction.editReply(`❌ Error: ${data.message || 'Unknown error'}`);
+    }
+
+    const budget = data.budget;
+    const t = budget.total;
+    const totalSpent = t.spent + t.pending;
+    const pctRemaining = t.budget > 0 ? t.remaining / t.budget * 100 : 0;
+
+    let health = '🟢 Within budget';
+    if (t.remaining < 0) health = '🔴 Over budget';
+    else if (pctRemaining <= 10) health = '🟡 Under 10% left';
+
+    const lines = [
+      `💰 **FRC Budget Status: ${budget.yearLabel}**`,
+      '',
+      `Total Budget:  **${formatMoney(t.budget)}**`,
+      `Total Spent:   **${formatMoney(totalSpent)}** (${formatMoney(t.spent)} logged by finance + ${formatMoney(t.pending)} pending in PartBot)`,
+      `Remaining:     **${formatMoney(t.remaining)}** (${pctRemaining.toFixed(1)}%)`,
+      `\`${budgetBar(t.percentUsed, 20)}\` ${health}`,
+      '',
+      '_Use /requestbudget for the breakdown by budget line._'
+    ];
+    if (!data.synced) {
+      lines.push(`⚠️ _Couldn't reach the finance sheet; showing numbers from ${formatDate(budget.lastSynced, 'the last sync')}._`);
+    }
+
+    return interaction.editReply(lines.join('\n'));
+
+  } catch (err) {
+    console.error('[handleBudgetStatus] Error:', err.message);
     return interaction.editReply('❌ Failed to contact Google Sheets');
   }
 }

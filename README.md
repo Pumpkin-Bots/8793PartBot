@@ -77,6 +77,7 @@ Students request parts using intuitive slash commands:
 **All commands:**
 - `/requestpart` - Submit a new part request (now with optional `sku` field!)
 - `/requestbudget` - Show the current FRC budget: spent, pending, and remaining
+- `/budgetstatus` - FRC budget summary: total budget, total spent, remaining $ and %
 - `/cancelrequest` - Cancel your own request
 - `/inventory` - Search inventory by SKU or keyword
 - `/openorders` - View all pending orders and denied requests
@@ -246,6 +247,12 @@ The repository does not currently include `.env.example` or `SharedConstants.gs`
 /requestbudget
 ```
 Shows each FRC budget line (Robot Hardware & Field Pieces, Tools & Supplies, Marketing/Spirit) with budget, spent (logged by finance), pending (PartBot requests not yet reimbursed), and remaining, plus the FRC total. Only you see the reply.
+
+### `/budgetstatus` - FRC Budget Summary
+```
+/budgetstatus
+```
+One-glance FRC total: budget, total spent (logged by finance + pending in PartBot), and remaining in dollars and percent. Only you see the reply.
 
 **SKU field behavior:**
 - **With SKU:** `sku:WCP-0785` → Guaranteed correct, AI skips SKU extraction

@@ -87,6 +87,7 @@ The verified `bot.js` registers these guild-scoped commands through `Routes.appl
 
 - `/requestpart`: subsystem, category, season (required), optional product link, SKU, quantity, max budget, priority, and notes
 - `/requestbudget`: FRC budget by line (private reply), via the `budgetStatus` action
+- `/budgetstatus`: FRC total budget, total spent, remaining $ and % (private reply), same `budgetStatus` action. It previously existed only in the VM's uncommitted `bot.js`.
 - `/cancelrequest`: request ID and optional reason
 - `/inventory`: exact SKU or keyword search
 - `/orderstatus`: request ID or order ID
