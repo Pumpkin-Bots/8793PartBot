@@ -124,7 +124,8 @@ Denied rows are highlighted red; cancelled rows gray. Received rows are green wh
 
 Ground truth is the finance spreadsheet **HMB Robotics 2027 Budget** (ID in `FINANCE_BUDGET` in `Code.js`), tab matching `Master ... Budget`. It holds donor names and other private data; only the FRC Expenses lines are read, and nothing from it belongs in the repo.
 
-- PartBot reads three lines from the `FRC Expenses` section by label: Robot Hardware & Field Pieces, Tools & Supplies, Marketing/Spirit (Budget = column B, Spent = column C). The budget year comes from the title, e.g. `(9/1/26-8/31/27)`.
+- PartBot reads every labeled line in the `FRC Expenses` section (Budget = column B, Spent = column C), stopping at the next `... Expenses` header. Requests count only against `BUDGET_LINES` (Robot Hardware & Field Pieces, Tools & Supplies, Marketing/Spirit), which must exist; other lines (Competition Registration, Travel & Food) are reported from finance only. The budget year comes from the title, e.g. `(9/1/26-8/31/27)`.
+- Budget tab: note in A6, header row 7, one row per FRC line from row 8, then `FRC Total`. Sync inserts or clears rows as the line count changes, so mentor rows below ("Budget Links") are never overwritten.
 - `syncFinanceBudget_()` copies those into the PartBot **Budget** tab (script-owned layout). It runs on Discord `discordRequest`/`budgetStatus`, hourly (`syncBudget` trigger), and from the menu. Everything else reads the Budget tab, because the `onEdit` simple trigger cannot open another spreadsheet.
 - Remaining per line = Budget − finance Spent − PartBot pending. Pending = budget-year requests not Cancelled/Denied and with **Reimbursed (W)** blank. Mentors fill W when finance logs the expense, to avoid double counting.
 - Category (U) maps to a line via `BUDGET_CATEGORIES`; blank (older rows) counts as Robot Hardware. Build Season (V) is recorded for reporting only.

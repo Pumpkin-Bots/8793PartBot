@@ -95,7 +95,7 @@ Every request counts against a line of the **HMB Robotics budget spreadsheet** (
 **Remaining = Budget − Spent (logged by finance) − PartBot pending.** Pending is this budget year's requests that aren't cancelled, denied, or reimbursed. When finance logs an expense, a mentor enters the date in the request's **Reimbursed** column so it isn't counted twice.
 
 - `/requestpart` replies with what's left in that budget line after your request
-- `/requestbudget` shows every FRC line (private reply)
+- `/requestbudget` shows every line under FRC Expenses in the budget sheet (Competition Registration, Travel & Food, Robot Hardware & Field Pieces, Marketing/Spirit, Tools & Supplies) with spent, pending, and remaining (private reply). Lines PartBot purchases don't use show finance's numbers only.
 - PartBot copies the budget amounts into its **Budget** tab hourly, on each Discord command, and from **🎃 PartBot → 🔄 Sync Budget**
 
 ### 🚫 Request Cancellation
@@ -246,13 +246,13 @@ The repository does not currently include `.env.example` or `SharedConstants.gs`
 ```
 /requestbudget
 ```
-Shows each FRC budget line (Robot Hardware & Field Pieces, Tools & Supplies, Marketing/Spirit) with budget, spent (logged by finance), pending (PartBot requests not yet reimbursed), and remaining, plus the FRC total. Only you see the reply.
+Shows every line under **FRC Expenses** in the HMB Robotics budget sheet (Competition Registration, Travel & Food, Robot Hardware & Field Pieces, Marketing/Spirit, Tools & Supplies, plus any line finance adds) with budget, spent (logged by finance), pending (PartBot requests not yet reimbursed), and remaining, plus the FRC total. Only you see the reply.
 
 ### `/budgetstatus` - FRC Budget Summary
 ```
 /budgetstatus
 ```
-One-glance FRC total: budget, total spent (logged by finance + pending in PartBot), and remaining in dollars and percent. Posted to the channel.
+One-glance total for everything under FRC Expenses: budget, total spent (logged by finance + pending in PartBot), and remaining in dollars and percent. Posted to the channel.
 
 **SKU field behavior:**
 - **With SKU:** `sku:WCP-0785` → Guaranteed correct, AI skips SKU extraction

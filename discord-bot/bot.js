@@ -140,7 +140,7 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('requestbudget')
-    .setDescription('Show the current FRC budget: spent, pending, and remaining'),
+    .setDescription('Full FRC budget by line: spent, pending, and remaining'),
 
   new SlashCommandBuilder()
     .setName('budgetstatus')
@@ -323,7 +323,10 @@ async function handleRequestBudget(interaction) {
         : `**${formatMoney(l.remaining)} left** of ${formatMoney(l.budget)}`;
       lines.push(`**${l.name}**`);
       lines.push(`\`${budgetBar(l.percentUsed)}\` ${l.percentUsed.toFixed(0)}% · ${left}`);
-      lines.push(`Spent ${formatMoney(l.spent)} · Pending ${formatMoney(l.pending)}`);
+      // Pending only applies to lines PartBot purchases count against
+      lines.push(l.partBot
+        ? `Spent ${formatMoney(l.spent)} · Pending ${formatMoney(l.pending)}`
+        : `Spent ${formatMoney(l.spent)}`);
       lines.push('');
     }
 

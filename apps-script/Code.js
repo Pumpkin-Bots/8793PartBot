@@ -1458,7 +1458,8 @@ const FINANCE_BUDGET = {
   SECTION:        'FRC Expenses'
 };
 
-// Budget lines PartBot reads from the FRC section of the finance sheet
+// Budget lines PartBot requests count against (all must exist in the FRC section).
+// Every other FRC line (e.g. Competition Registration) is reported from finance only.
 const BUDGET_LINES = [
   'Robot Hardware & Field Pieces',
   'Tools & Supplies',
@@ -1484,9 +1485,11 @@ const BUDGET_TAB = {
   YEAR_END:    'B3',
   SOURCE:      'B4',
   LAST_SYNCED: 'B5',
+  NOTE:        'A6',
   HEADER_ROW:  7,
-  FIRST_LINE_ROW: 8,      // one row per BUDGET_LINES entry
-  NUM_COLS:    6          // Line | Budget | Spent | Pending | Remaining | % Used
+  FIRST_LINE_ROW: 8,      // one row per FRC line, then the FRC Total row
+  NUM_COLS:    6,         // Line | Budget | Spent | Pending | Remaining | % Used
+  TOTAL_LABEL: 'FRC Total'
 };
 
 function budgetLineFor_(category) {
@@ -1514,15 +1517,18 @@ function syncFinanceBudget_() {
   const start = values.findIndex(r => norm(r[0]) === norm(FINANCE_BUDGET.SECTION));
   if (start < 0) throw new Error(`"${FINANCE_BUDGET.SECTION}" not found on ${master.getName()}`);
 
-  const found = {};
+  // Every labeled line in the section, in finance's order
+  const found = [];
   for (let i = start + 1; i < values.length; i++) {
-    const label = norm(values[i][0]);
-    if (/expenses$/.test(label)) break;
-    const line = BUDGET_LINES.find(l => norm(l) === label);
-    if (line) found[line] = { budget: parseFloat(values[i][1]) || 0, spent: parseFloat(values[i][2]) || 0 };
+    const label = (values[i][0] || '').toString().trim();
+    if (!label) continue;
+    if (/expenses$/i.test(label)) break;
+    found.push({ name: label, budget: parseFloat(values[i][1]) || 0, spent: parseFloat(values[i][2]) || 0 });
   }
-  const missing = BUDGET_LINES.filter(l => !found[l]);
+  const missing = BUDGET_LINES.filter(l => !found.some(f => norm(f.name) === norm(l)));
   if (missing.length) throw new Error(`Budget line(s) not found in ${FINANCE_BUDGET.SECTION}: ${missing.join(', ')}`);
+  // Use PartBot's spelling for the lines requests count against
+  found.forEach(f => { f.name = BUDGET_LINES.find(l => norm(l) === norm(f.name)) || f.name; });
 
   const tab = getOrCreateBudgetTab_();
   tab.getRange('A1:B5').setValues([
@@ -1532,13 +1538,39 @@ function syncFinanceBudget_() {
     ['Synced From', `${finance.getName()} → ${master.getName()}`],
     ['Last Synced', new Date()]
   ]);
+  tab.getRange(BUDGET_TAB.NOTE)
+    .setValue('This tab is written by PartBot. Change budget amounts in the HMB Robotics budget spreadsheet, then run 🎃 PartBot → 🔄 Sync Budget.')
+    .setFontStyle('italic');
   tab.getRange(BUDGET_TAB.HEADER_ROW, 1, 1, BUDGET_TAB.NUM_COLS).setValues([[
     'Budget Line', 'Budget', 'Spent (Finance)', 'PartBot Pending', 'Remaining', '% Used'
   ]]).setFontWeight('bold');
-  tab.getRange(BUDGET_TAB.FIRST_LINE_ROW, 1, BUDGET_LINES.length, 3)
-    .setValues(BUDGET_LINES.map(l => [l, found[l].budget, found[l].spent]));
+
+  // Grow or shrink the table so mentor rows below it (e.g. "Budget Links") are never overwritten
+  const oldTotalRow = findBudgetTotalRow_(tab);
+  const newTotalRow = BUDGET_TAB.FIRST_LINE_ROW + found.length;
+  if (newTotalRow > oldTotalRow) {
+    tab.insertRowsAfter(oldTotalRow, newTotalRow - oldTotalRow);
+  } else if (newTotalRow < oldTotalRow) {
+    tab.getRange(newTotalRow + 1, 1, oldTotalRow - newTotalRow, BUDGET_TAB.NUM_COLS).clear();
+  }
+  tab.getRange(BUDGET_TAB.FIRST_LINE_ROW, 1, found.length, 3)
+    .setValues(found.map(f => [f.name, f.budget, f.spent]));
+  tab.getRange(newTotalRow, 1).setValue(BUDGET_TAB.TOTAL_LABEL);
+
+  // The note used to sit two rows below the table; it now lives in A6
+  const below = tab.getRange(newTotalRow + 1, 1, 5, 1);
+  below.getValues().forEach((r, i) => {
+    if (/^This tab is written by PartBot/.test(r[0])) tab.getRange(newTotalRow + 1 + i, 1).clear();
+  });
 
   Logger.log('[syncFinanceBudget_] Synced ' + JSON.stringify(found));
+}
+
+// Row of the "FRC Total" label; before the first full-section sync, the 3-line table ended at row 11
+function findBudgetTotalRow_(tab) {
+  const labels = tab.getRange(BUDGET_TAB.FIRST_LINE_ROW, 1, 40, 1).getValues();
+  const i = labels.findIndex(r => r[0] === BUDGET_TAB.TOTAL_LABEL);
+  return i >= 0 ? BUDGET_TAB.FIRST_LINE_ROW + i : BUDGET_TAB.FIRST_LINE_ROW + BUDGET_LINES.length;
 }
 
 function parseShortDate_(text) {
@@ -1557,9 +1589,6 @@ function getOrCreateBudgetTab_() {
   if (fresh || tab.getRange('A1').getValue() !== 'Budget Year') {
     tab.getRange('A1:F16').clear();
     tab.getRange('A1:A5').setFontWeight('bold');
-    tab.getRange(BUDGET_TAB.FIRST_LINE_ROW + BUDGET_LINES.length + 2, 1)
-      .setValue('This tab is written by PartBot. Change budget amounts in the HMB Robotics budget spreadsheet, then run 🎃 PartBot → 🔄 Sync Budget.')
-      .setFontStyle('italic');
   }
   return tab;
 }
@@ -1581,9 +1610,14 @@ function getBudgetConfig_() {
     throw new Error('Budget not synced yet. Run 🎃 PartBot → 🔄 Sync Budget.');
   }
 
-  const rows  = tab.getRange(BUDGET_TAB.FIRST_LINE_ROW, 1, BUDGET_LINES.length, 3).getValues();
-  const lines = {};
+  // All FRC lines down to the "FRC Total" row, in finance's order
+  const totalRow  = findBudgetTotalRow_(tab);
+  const rows      = tab.getRange(BUDGET_TAB.FIRST_LINE_ROW, 1, totalRow - BUDGET_TAB.FIRST_LINE_ROW, 3).getValues();
+  const lineOrder = [];
+  const lines     = {};
   rows.forEach(([name, budget, spent]) => {
+    if (!name) return;
+    lineOrder.push(name);
     lines[name] = { budget: parseFloat(budget) || 0, spent: parseFloat(spent) || 0 };
   });
 
@@ -1592,6 +1626,7 @@ function getBudgetConfig_() {
     seasonStart: new Date(tab.getRange(BUDGET_TAB.YEAR_START).getValue()),   // budget year start
     seasonEnd:   new Date(tab.getRange(BUDGET_TAB.YEAR_END).getValue()),     // budget year end
     lastSynced:  tab.getRange(BUDGET_TAB.LAST_SYNCED).getValue(),
+    lineOrder:   lineOrder,
     lines:       lines
   };
 }
@@ -1635,14 +1670,19 @@ function getBudgetStatus_() {
     }
   }
 
-  const lines = BUDGET_LINES.map(name => {
+  // Older Budget tabs (before the full FRC sync) may lack a purchase line
+  const order = config.lineOrder.concat(BUDGET_LINES.filter(l => config.lineOrder.indexOf(l) < 0));
+  const lines = order.map(name => {
     const { budget, spent } = config.lines[name] || { budget: 0, spent: 0 };
-    const used = spent + pending[name];
+    const isPartBot   = BUDGET_LINES.indexOf(name) >= 0;
+    const linePending = isPartBot ? pending[name] : 0;
+    const used        = spent + linePending;
     return {
       name,
+      partBot:     isPartBot,   // PartBot requests count against this line
       budget,
       spent,
-      pending:     pending[name],
+      pending:     linePending,
       remaining:   budget - used,
       percentUsed: budget > 0 ? used / budget * 100 : 0
     };
@@ -1650,7 +1690,7 @@ function getBudgetStatus_() {
 
   const sum   = key => lines.reduce((t, l) => t + l[key], 0);
   const total = {
-    name:      'FRC Total',
+    name:      BUDGET_TAB.TOTAL_LABEL,
     budget:    sum('budget'),
     spent:     sum('spent'),
     pending:   sum('pending'),
