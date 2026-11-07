@@ -144,6 +144,14 @@ Supports:
 
 ---
 
+## Reimbursement Requests
+
+Reimbursement reports run from the local Mac CLI, not from the PartBot spreadsheet, using only invoice PDFs in a folder (no Gmail or Sheets access). Run `npm install` in `reimbursement-local/`, then see [the local reimbursement guide](reimbursement-local/README.md).
+
+The command reads each PDF's text, suggests a form description and amount, and asks for confirmation. It creates a new `Submitted_<YYYY-MM-DD>_<original folder name>` folder containing the completed BGCC `.xlsx`, a printable PDF preview generated directly from the form values, a receipts-only combined PDF, and numbered individual receipt PDFs. It does not email or submit anything to accounting.
+
+---
+
 ## Architecture
 ```
 Discord Slash Commands
@@ -154,7 +162,7 @@ Node.js Discord Bot (bot.js)
   - HTTP requests to Apps Script
   - SKU parameter extraction and validation
         ↓
-Google Apps Script Web App (Code.gs)
+Google Apps Script (apps-script/Code.js)
   - Request routing (doPost)
   - Database operations
   - User SKU handling (priority over AI)
@@ -184,17 +192,25 @@ Google Gemini API (gemini-2.5-flash)
 │   ├── shared-constants.js       # Shared API constants
 │   ├── package.json
 │   ├── package-lock.json
-│   ├── .env                      # Environment variables (not in git)
-│   └── .env.example              # Template for .env
+│   └── .env                      # Local/VM secrets; not committed
 │
 ├── apps-script/
-│   ├── Code.gs                   # Main Apps Script (with user SKU override)
-│   ├── SharedConstants.gs        # Shared constants (optional)
+│   ├── Code.js                   # Main bound Apps Script
+│   ├── .clasp.json               # Apps Script project mapping
 │   └── appsscript.json           # Apps Script manifest
+├── reimbursement-local/
+│   ├── src/cli.js                 # Local reimbursement report command
+│   ├── src/invoice.js             # PDF text extraction and invoice parsing
+│   ├── src/report.js              # XLSX output and local PDF merge
+│   ├── test/report.test.js
+│   └── README.md                  # Local setup and usage
 │
+├── CLAUDE.md
 ├── LICENSE
 └── README.md                     # This file
 ```
+
+The repository does not currently include `.env.example` or `SharedConstants.gs`; update this tree when those files are added.
 
 ---
 
