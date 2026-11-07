@@ -343,13 +343,14 @@ function enrichPartRequest(requestID, row) {
     const partLink = sheet.getRange(row, PART_REQUESTS_COLS.PART_LINK).getValue();
     const existingPartName = sheet.getRange(row, PART_REQUESTS_COLS.PART_NAME).getValue();
     const existingSku = sheet.getRange(row, PART_REQUESTS_COLS.SKU).getValue();
-    
+    const existingPrice = parseFloat(sheet.getRange(row, PART_REQUESTS_COLS.EST_UNIT_PRICE).getValue()) || 0;
+
     if (existingSku) {
       Logger.log('[enrichPartRequest] User provided SKU - will only enrich Part Name and Price');
     }
-    
-    if (!partLink || (existingPartName && existingSku)) {
-      Logger.log('[enrichPartRequest] No link or already has name/SKU, skipping');
+
+    if (!partLink || (existingPartName && existingSku && existingPrice > 0)) {
+      Logger.log('[enrichPartRequest] No link or already has name/SKU/price, skipping');
       return;
     }
     
@@ -364,7 +365,13 @@ function enrichPartRequest(requestID, row) {
     if (!extracted) {
       extracted = { partName: null, sku: null, price: null };
     }
-    
+
+    // Price from page metadata (og:price:amount etc.) when Gemini finds none
+    if (!extracted.price) {
+      const listed = pageContent.match(/^Listed Price: ([0-9.]+)/m);
+      if (listed) extracted.price = parseFloat(listed[1]);
+    }
+
     // McMaster fallback
     if ((!extracted.partName || !extracted.sku) && partLink.toLowerCase().includes('mcmaster.com')) {
       const urlMatch = partLink.match(/mcmaster\.com\/([0-9A-Z\-]+)/i);
@@ -453,7 +460,12 @@ function fetchPageContent_(url) {
     }
     
     const html = response.getContentText();
-    
+
+    // Shopify-style stores (WCP, AndyMark, etc.) put the price in meta tags,
+    // which the tag-stripping below would discard
+    const listedPrice = getListedPrice_(html);
+    const pricePrefix = listedPrice ? `Listed Price: ${listedPrice}\n\n` : '';
+
     if (url.toLowerCase().includes('mcmaster.com')) {
       const titleMatch = html.match(/<title[^>]*>([^<]+)<\/title>/i);
       if (titleMatch && titleMatch[1]) {
@@ -476,13 +488,29 @@ function fetchPageContent_(url) {
       .trim();
     
     if (text.length > 8000) text = text.substring(0, 8000);
-    
-    return text;
-    
+
+    return pricePrefix + text;
+
   } catch (err) {
     Logger.log(`[fetchPageContent_] Error: ${err}`);
     return null;
   }
+}
+
+function getListedPrice_(html) {
+  const patterns = [
+    /<meta[^>]+property=["'](?:og|product):price:amount["'][^>]+content=["']([0-9.,]+)["']/i,
+    /<meta[^>]+content=["']([0-9.,]+)["'][^>]+property=["'](?:og|product):price:amount["']/i,
+    /itemprop=["']price["'][^>]+content=["']([0-9.,]+)["']/i
+  ];
+  for (const re of patterns) {
+    const m = html.match(re);
+    if (m) {
+      const price = parseFloat(m[1].replace(/,/g, ''));
+      if (price > 0) return price;
+    }
+  }
+  return null;
 }
 
 // ★ IMPROVED: More aggressive price extraction prompt
@@ -542,9 +570,11 @@ Example of correct output: {"partName":"WCP Flanged Bearing 1/2 Hex","sku":"WCP-
     
     const payload = {
       contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { 
+      generationConfig: {
         temperature: 0.1,
-        maxOutputTokens: 1024
+        maxOutputTokens: 1024,
+        // 2.5-flash thinking tokens count against maxOutputTokens and can leave no room for the JSON
+        thinkingConfig: { thinkingBudget: 0 }
       }
     };
     
@@ -1607,31 +1637,57 @@ function showBudgetStatus() {
  * BUDGET STATUS PER REQUEST (Column P)
  ******************************************************/
 
+// Menu: fill missing prices for this season's active requests
 function enrichAllPending() {
-  const ss    = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName('Part Requests');
-  const data  = sheet.getDataRange().getValues();
-  
+  const ss      = SpreadsheetApp.getActive();
+  const sheet   = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  const config  = getBudgetConfig_();
+  const data    = sheet.getDataRange().getValues();
+  const started = Date.now();
+
+  let tried = 0, priced = 0, timedOut = false;
+  const stillMissing = [];
+
   for (let i = 1; i < data.length; i++) {
-    const id      = (data[i][0] || '').toString();
-    const link    = (data[i][6] || '').toString();
-    const estCost = parseFloat(data[i][13]) || 0;
-    const status  = (data[i][16] || '').toString();
-    
-    // Skip if no link, already has price, or terminal status
-    if (!link) continue;
+    const id      = (data[i][PART_REQUESTS_COLS.REQUEST_ID - 1]     || '').toString();
+    const link    = (data[i][PART_REQUESTS_COLS.PART_LINK - 1]      || '').toString();
+    const estCost = parseFloat(data[i][PART_REQUESTS_COLS.TOTAL_EST_COST - 1]) || 0;
+    const status  = (data[i][PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString();
+    const ts      = data[i][PART_REQUESTS_COLS.TIMESTAMP - 1];
+
+    // Skip if no link, already has price, cancelled/denied, or outside season
+    if (!id || !link) continue;
     if (estCost > 0) continue;
-    if (status.includes('✔️') || status.includes('❌') || status.includes('🚫')) continue;
-    
+    if (status === STATUS.CANCELLED || status === STATUS.DENIED) continue;
+    if (ts) {
+      const reqDate = new Date(ts);
+      if (reqDate < config.seasonStart || reqDate > config.seasonEnd) continue;
+    }
+
+    // Stay under the 6-minute Apps Script limit; re-run to continue
+    if (Date.now() - started > 4.5 * 60 * 1000) { timedOut = true; break; }
+
     Logger.log(`Enriching row ${i+1}: ${id}`);
+    tried++;
     try {
       enrichPartRequest(id, i + 1);
-      Utilities.sleep(2000); // Avoid rate limiting
+      const cost = parseFloat(sheet.getRange(i + 1, PART_REQUESTS_COLS.TOTAL_EST_COST).getValue()) || 0;
+      if (cost > 0) priced++; else stillMissing.push(id);
+      Utilities.sleep(1000); // Avoid rate limiting
     } catch(e) {
       Logger.log(`Error on ${id}: ` + e);
+      stillMissing.push(id);
     }
   }
-  Logger.log('Done enriching all pending requests');
+
+  refreshAllBudgetStatuses_(sheet);
+
+  let message = `Checked ${tried} request(s); found prices for ${priced}.`;
+  if (stillMissing.length) {
+    message += `\n\nStill no price (enter manually — McMaster-Carr pages hide prices):\n${stillMissing.join(', ')}`;
+  }
+  if (timedOut) message += '\n\nStopped early to avoid a timeout — run again to continue.';
+  SpreadsheetApp.getUi().alert('💲 Fill Missing Prices', message, SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
 function updateBudgetStatus_(sheet, row) {
@@ -1819,6 +1875,7 @@ function onOpen() {
     .addSeparator()
     .addItem('🧹 Clean Up Empty Rows',            'cleanupEmptyRows')
     .addItem('✨ Enrich Part Request',             'enrichSelectedRequest')
+    .addItem('💲 Fill Missing Prices',             'enrichAllPending')
     .addItem('📦 Retry Add to Inventory',         'retryAddToInventory')
     .addItem('🔍 Find Missing Inventory Items',   'findMissingInventoryItems')
     .addItem('💰 Refresh All Budget Statuses',    'refreshAllBudgetStatuses')
