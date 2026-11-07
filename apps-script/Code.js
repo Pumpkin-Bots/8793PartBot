@@ -1596,16 +1596,21 @@ function getBudgetConfig_() {
   };
 }
 
+// getValues() rows stop at the sheet's last used column, so W can be undefined
+function isReimbursed_(row) {
+  const v = row[PART_REQUESTS_COLS.REIMBURSED - 1];
+  return v instanceof Date || (v !== undefined && v !== null && v.toString().trim() !== '');
+}
+
 // Returns the budget line a row's cost counts against, or null if it doesn't count
 function pendingBudgetLine_(row, config) {
   const id         = (row[PART_REQUESTS_COLS.REQUEST_ID - 1]     || '').toString();
   const status     = (row[PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString();
   const ts         = row[PART_REQUESTS_COLS.TIMESTAMP - 1];
-  const reimbursed = row[PART_REQUESTS_COLS.REIMBURSED - 1];
 
   if (!id) return null;
   if (status === STATUS.CANCELLED || status === STATUS.DENIED) return null;
-  if (reimbursed !== '' && reimbursed !== null) return null;   // now in finance "Spent"
+  if (isReimbursed_(row)) return null;   // now in finance "Spent"
   if (ts) {
     const reqDate = new Date(ts);
     if (reqDate < config.seasonStart || reqDate > config.seasonEnd) return null;
@@ -1817,8 +1822,12 @@ function refreshAllBudgetStatuses_(sheet) {
     for (let i = 1; i < data.length; i++) {
       const line = pendingBudgetLine_(data[i], config);
       if (!line) {
-        const r = data[i][PART_REQUESTS_COLS.REIMBURSED - 1];
-        if (data[i][PART_REQUESTS_COLS.REQUEST_ID - 1] && r !== '' && r !== null) reimbursed.push(i + 1);
+        if (data[i][PART_REQUESTS_COLS.REQUEST_ID - 1] && isReimbursed_(data[i])) {
+          reimbursed.push(i + 1);
+        } else if (/^💵/.test(data[i][PART_REQUESTS_COLS.BUDGET_STATUS - 1] || '')) {
+          // Label no longer applies (Reimbursed date removed)
+          sheet.getRange(i + 1, PART_REQUESTS_COLS.BUDGET_STATUS).setValue('');
+        }
         continue;
       }
       const timestamp = data[i][PART_REQUESTS_COLS.TIMESTAMP - 1];
