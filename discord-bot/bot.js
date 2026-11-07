@@ -64,6 +64,17 @@ function formatEta(value) {
   return formatDate(value, 'Not set');
 }
 
+function formatMoney(value) {
+  const n = Number(value) || 0;
+  const s = '$' + Math.abs(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return n < 0 ? '-' + s : s;
+}
+
+function budgetBar(percentUsed, width = 16) {
+  const filled = Math.max(0, Math.min(width, Math.round(percentUsed / 100 * width)));
+  return '█'.repeat(filled) + '░'.repeat(width - filled);
+}
+
 const commands = [
   new SlashCommandBuilder()
     .setName('requestpart')
@@ -83,6 +94,23 @@ const commands = [
           { name: 'Safety', value: 'Safety' },
           { name: 'Spares', value: 'Spares' },
           { name: 'Other', value: 'Other' }
+        )
+    )
+    .addStringOption(option =>
+      option.setName('category').setDescription('What is this purchase for? (sets which budget it counts against)').setRequired(true)
+        .addChoices(
+          { name: 'Robot Part', value: 'Robot Part' },
+          { name: 'Field Piece', value: 'Field Piece' },
+          { name: 'Tool', value: 'Tool' },
+          { name: 'Supply', value: 'Supply' },
+          { name: 'Marketing/Spirit', value: 'Marketing/Spirit' }
+        )
+    )
+    .addStringOption(option =>
+      option.setName('season').setDescription('In-season or off-season build').setRequired(true)
+        .addChoices(
+          { name: 'In-season', value: 'In-season' },
+          { name: 'Off-season', value: 'Off-season' }
         )
     )
     .addStringOption(option =>
@@ -109,6 +137,10 @@ const commands = [
     .addStringOption(option =>
       option.setName('notes').setDescription('Additional notes').setRequired(false)
     ),
+
+  new SlashCommandBuilder()
+    .setName('requestbudget')
+    .setDescription('Show the current FRC budget: spent, pending, and remaining'),
 
   new SlashCommandBuilder()
     .setName('cancelrequest')
@@ -172,6 +204,9 @@ client.on('interactionCreate', async interaction => {
       case 'requestpart':
         await handleRequestPart(interaction);
         break;
+      case 'requestbudget':
+        await handleRequestBudget(interaction);
+        break;
       case 'cancelrequest':
         await handleCancelRequest(interaction);
         break;
@@ -198,6 +233,8 @@ client.on('interactionCreate', async interaction => {
 
 async function handleRequestPart(interaction) {
   const subsystem = interaction.options.getString('subsystem');
+  const category = interaction.options.getString('category');
+  const season = interaction.options.getString('season');
   const link = interaction.options.getString('link') || '';
   const sku = interaction.options.getString('sku') || '';
   const qty = interaction.options.getInteger('qty') || 1;
@@ -218,7 +255,9 @@ async function handleRequestPart(interaction) {
       neededBy: '',
       maxBudget: maxBudget,
       priority: priority,
-      notes: `[Discord] ${notes}`.trim()
+      notes: `[Discord] ${notes}`.trim(),
+      budgetCategory: category,
+      buildSeason: season
     };
 
     const response = await axios.post(APPS_SCRIPT_URL, payload);
@@ -236,11 +275,62 @@ async function handleRequestPart(interaction) {
     if (link) responseLines.push(`Link: ${link}`);
     if (sku) responseLines.push(`SKU: **${sku}** (user-specified)`);
     responseLines.push(`Qty: **${qty}**, Priority: **${priority}**`);
+    responseLines.push(`Category: **${category}** (${season})`);
+
+    const b = data.budget;
+    if (b) {
+      if (b.requestCost > 0) {
+        responseLines.push(b.remaining < 0
+          ? `🔴 **${b.line}**: ${formatMoney(-b.remaining)} **over budget** after this request (${formatMoney(b.requestCost)})`
+          : `💰 **${b.line}**: ${formatMoney(b.remaining)} left of ${formatMoney(b.budget)} after this request (${formatMoney(b.requestCost)})`);
+      } else {
+        responseLines.push(`💰 **${b.line}**: ${formatMoney(b.remaining)} left of ${formatMoney(b.budget)}. No price found yet, so this request isn't counted until a mentor adds one.`);
+      }
+    }
 
     return interaction.editReply(responseLines.join('\n'));
 
   } catch (err) {
     console.error('[handleRequestPart] Error:', err.message);
+    return interaction.editReply('❌ Failed to contact Google Sheets');
+  }
+}
+
+async function handleRequestBudget(interaction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  try {
+    const response = await axios.post(APPS_SCRIPT_URL, { action: 'budgetStatus' });
+    const data = response.data;
+
+    if (data.status !== 'ok') {
+      return interaction.editReply(`❌ Error: ${data.message || 'Unknown error'}`);
+    }
+
+    const budget = data.budget;
+    const lines = [`💰 **FRC Budget: ${budget.yearLabel}**`, ''];
+
+    for (const l of budget.lines) {
+      const left = l.remaining < 0
+        ? `🔴 **${formatMoney(-l.remaining)} over**`
+        : `**${formatMoney(l.remaining)} left** of ${formatMoney(l.budget)}`;
+      lines.push(`**${l.name}**`);
+      lines.push(`\`${budgetBar(l.percentUsed)}\` ${l.percentUsed.toFixed(0)}% · ${left}`);
+      lines.push(`Spent ${formatMoney(l.spent)} · Pending ${formatMoney(l.pending)}`);
+      lines.push('');
+    }
+
+    const t = budget.total;
+    lines.push(`**FRC total:** ${formatMoney(t.remaining)} left of ${formatMoney(t.budget)} (${t.percentUsed.toFixed(0)}% used)`);
+    lines.push('_Spent = logged by finance. Pending = PartBot requests not yet reimbursed._');
+    if (!data.synced) {
+      lines.push(`⚠️ _Couldn't reach the finance sheet; showing numbers from ${formatDate(budget.lastSynced, 'the last sync')}._`);
+    }
+
+    return interaction.editReply(lines.join('\n'));
+
+  } catch (err) {
+    console.error('[handleRequestBudget] Error:', err.message);
     return interaction.editReply('❌ Failed to contact Google Sheets');
   }
 }

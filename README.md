@@ -20,7 +20,7 @@ It replaces DM chaos, ad‑hoc spreadsheets, and manual vendor lookups with a st
 ### 🎯 User SKU Override (NEW!)
 Students can now specify exact SKUs when requesting parts from multi-variant product pages:
 ```
-/requestpart subsystem:Drive link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
+/requestpart subsystem:Drive category:Robot Part season:In-season link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
 ```
 
 **Why this matters:**
@@ -32,11 +32,11 @@ Students can now specify exact SKUs when requesting parts from multi-variant pro
 **Example use case:**
 ```
 Without SKU field:
-/requestpart subsystem:Drive link:https://wcproducts.com/products/ball-bearings qty:4 notes:"1/2 inch flanged"
+/requestpart subsystem:Drive category:Robot Part season:In-season link:https://wcproducts.com/products/ball-bearings qty:4 notes:"1/2 inch flanged"
 → AI might extract WCP-0783 (wrong variant) ❌
 
 With SKU field:
-/requestpart subsystem:Drive link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
+/requestpart subsystem:Drive category:Robot Part season:In-season link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
 → Guaranteed WCP-0785 (correct variant) ✅
 ```
 
@@ -71,15 +71,31 @@ Automatically extracts from a vendor URL:
 ### 💬 Discord Slash Commands
 Students request parts using intuitive slash commands:
 ```
-/requestpart subsystem:Drive link:<URL> sku:WCP-0785 qty:2 priority:High notes:"For shooter prototype"
+/requestpart subsystem:Drive category:Robot Part season:In-season link:<URL> sku:WCP-0785 qty:2 priority:High notes:"For shooter prototype"
 ```
 
 **All commands:**
 - `/requestpart` - Submit a new part request (now with optional `sku` field!)
+- `/requestbudget` - Show the current FRC budget: spent, pending, and remaining
 - `/cancelrequest` - Cancel your own request
 - `/inventory` - Search inventory by SKU or keyword
 - `/openorders` - View all pending orders and denied requests
 - `/orderstatus` - Check status of a specific request or order
+
+### 💰 Live FRC Budget
+Every request counts against a line of the **HMB Robotics budget spreadsheet** (finance's ground truth):
+
+| Request category | Budget line |
+|---|---|
+| Robot Part, Field Piece | Robot Hardware & Field Pieces |
+| Tool, Supply | Tools & Supplies |
+| Marketing/Spirit | Marketing/Spirit |
+
+**Remaining = Budget − Spent (logged by finance) − PartBot pending.** Pending is this budget year's requests that aren't cancelled, denied, or reimbursed. When finance logs an expense, a mentor enters the date in the request's **Reimbursed** column so it isn't counted twice.
+
+- `/requestpart` replies with what's left in that budget line after your request
+- `/requestbudget` shows every FRC line (private reply)
+- PartBot copies the budget amounts into its **Budget** tab hourly, on each Discord command, and from **🎃 PartBot → 🔄 Sync Budget**
 
 ### 🚫 Request Cancellation
 Students can cancel their own requests:
@@ -206,6 +222,8 @@ The repository does not currently include `.env.example` or `SharedConstants.gs`
 ```
 /requestpart 
   subsystem:Drive           # Required: Drive, Intake, Shooter, etc.
+  category:Robot Part       # Required: Robot Part, Field Piece, Tool, Supply, Marketing/Spirit
+  season:In-season          # Required: In-season or Off-season
   link:https://...          # Optional: Vendor URL (triggers AI enrichment)
   sku:WCP-0785              # Optional: Exact SKU (overrides AI detection) ⭐ NEW!
   qty:2                     # Optional: Quantity (default: 1)
@@ -221,6 +239,13 @@ The repository does not currently include `.env.example` or `SharedConstants.gs`
 4. Notification sent to Discord procurement channel
 5. Discord shows: `SKU: **WCP-0785** (user-specified)` if you provided it
 6. Request ID returned (e.g., REQ-12345678)
+7. Discord shows what's left in the request's budget line after this purchase
+
+### `/requestbudget` - Current FRC Budget
+```
+/requestbudget
+```
+Shows each FRC budget line (Robot Hardware & Field Pieces, Tools & Supplies, Marketing/Spirit) with budget, spent (logged by finance), pending (PartBot requests not yet reimbursed), and remaining, plus the FRC total. Only you see the reply.
 
 **SKU field behavior:**
 - **With SKU:** `sku:WCP-0785` → Guaranteed correct, AI skips SKU extraction
@@ -230,13 +255,13 @@ The repository does not currently include `.env.example` or `SharedConstants.gs`
 **Examples:**
 ```bash
 # Exact SKU for multi-variant page (recommended for WCP, McMaster)
-/requestpart subsystem:Drive link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
+/requestpart subsystem:Drive category:Robot Part season:In-season link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
 
 # Let AI detect SKU (works well for single-product pages)
-/requestpart subsystem:Intake link:https://www.revrobotics.com/rev-21-1650/ qty:2
+/requestpart subsystem:Intake category:Robot Part season:In-season link:https://www.revrobotics.com/rev-21-1650/ qty:2
 
 # No link, no SKU (manual entry by mentor)
-/requestpart subsystem:Electrical notes:"5mm LED, red" qty:10
+/requestpart subsystem:Electrical category:Supply season:In-season notes:"5mm LED, red" qty:10
 ```
 
 ### `/cancelrequest` - Cancel Your Request
@@ -420,16 +445,16 @@ pm2 restart discord-bot
 
 ```bash
 # GOOD: Multi-variant page with specific SKU
-/requestpart subsystem:Drive link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
+/requestpart subsystem:Drive category:Robot Part season:In-season link:https://wcproducts.com/products/ball-bearings sku:WCP-0785 qty:4
 
 # GOOD: Single-product page, let AI detect
-/requestpart subsystem:Intake link:https://www.revrobotics.com/rev-21-1650/ qty:2
+/requestpart subsystem:Intake category:Robot Part season:In-season link:https://www.revrobotics.com/rev-21-1650/ qty:2
 
 # GOOD: McMaster with known part number
-/requestpart subsystem:Mechanical link:https://mcmaster.com/93475A230/ sku:93475A230 qty:20
+/requestpart subsystem:Mechanical category:Robot Part season:In-season link:https://mcmaster.com/93475A230/ sku:93475A230 qty:20
 
 # BAD: Generic request (use notes instead)
-/requestpart subsystem:Electrical notes:"Red 5mm LEDs" qty:10
+/requestpart subsystem:Electrical category:Supply season:In-season notes:"Red 5mm LEDs" qty:10
 ```
 
 ---

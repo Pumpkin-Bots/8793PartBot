@@ -85,19 +85,18 @@ Never commit credentials or paste them into chat.
 
 The verified `bot.js` registers these guild-scoped commands through `Routes.applicationGuildCommands`:
 
-- `/requestpart`: subsystem, optional product link, SKU, quantity, max budget, priority, and notes
+- `/requestpart`: subsystem, category, season (required), optional product link, SKU, quantity, max budget, priority, and notes
+- `/requestbudget`: FRC budget by line (private reply), via the `budgetStatus` action
 - `/cancelrequest`: request ID and optional reason
 - `/inventory`: exact SKU or keyword search
 - `/orderstatus`: request ID or order ID
 - `/openorders`: pending orders and denied requests
 
-`/budgetstatus` is described in some handoff material but was **not** registered in the verified bot source. Apps Script does include a `budgetStatus` action/handler; keep the distinction clear when changing docs or implementation.
-
 Apps Script `doPost` actions include `health`, `discordRequest`, `inventory`, `orderStatus`, `openOrders`, `cancelRequest`, and `budgetStatus`. `shared-constants.js` contains action/field constants and validation helpers, but no corresponding `SharedConstants.gs` was present in the Apps Script directory at verification. Keep the actual bot and Apps Script contract synchronized when adding or changing actions.
 
 ## Data Model
 
-**Part Requests (A–T):** Request ID | Timestamp | Requester | Subsystem | Part Name | SKU | Part Link | Quantity | Priority | Needed By | Inventory On-Hand | Vendor Stock | Est Unit Price | Total Est Cost | Max Budget | Budget Status | Request Status (Q) | Mentor Notes (R) | Expedited Shipping | In Inventory (T)
+**Part Requests (A–W):** Request ID | Timestamp | Requester | Subsystem | Part Name | SKU | Part Link | Quantity | Priority | Needed By | Inventory On-Hand | Vendor Stock | Est Unit Price | Total Est Cost | Max Budget | Budget Status (P) | Request Status (Q) | Mentor Notes (R) | Expedited Shipping | In Inventory (T) | Category (U) | Build Season (V) | Reimbursed (W)
 
 **Orders (A–O):** Order ID | Included Request IDs | Vendor | Part Name | SKU | Qty Ordered | Final Unit Price | Total Cost | Order Date | Shipping Method | Tracking | ETA | Received Date | Order Status | Mentor Notes
 
@@ -118,6 +117,16 @@ Submitted -> Under Review -> Approved (creates Orders row)
 ```
 
 Denied rows are highlighted red; cancelled rows gray. Received rows are green when added to inventory and yellow when missing from inventory.
+
+## Budget
+
+Ground truth is the finance spreadsheet **HMB Robotics 2027 Budget** (ID in `FINANCE_BUDGET` in `Code.js`), tab matching `Master ... Budget`. It holds donor names and other private data; only the FRC Expenses lines are read, and nothing from it belongs in the repo.
+
+- PartBot reads three lines from the `FRC Expenses` section by label: Robot Hardware & Field Pieces, Tools & Supplies, Marketing/Spirit (Budget = column B, Spent = column C). The budget year comes from the title, e.g. `(9/1/26-8/31/27)`.
+- `syncFinanceBudget_()` copies those into the PartBot **Budget** tab (script-owned layout). It runs on Discord `discordRequest`/`budgetStatus`, hourly (`syncBudget` trigger), and from the menu. Everything else reads the Budget tab, because the `onEdit` simple trigger cannot open another spreadsheet.
+- Remaining per line = Budget − finance Spent − PartBot pending. Pending = budget-year requests not Cancelled/Denied and with **Reimbursed (W)** blank. Mentors fill W when finance logs the expense, to avoid double counting.
+- Category (U) maps to a line via `BUDGET_CATEGORIES`; blank (older rows) counts as Robot Hardware. Build Season (V) is recorded for reporting only.
+- The web app runs as the deploying user, so that account needs Viewer access to the finance spreadsheet.
 
 ## Implemented Behavior to Preserve
 

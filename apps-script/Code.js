@@ -37,7 +37,10 @@ const PART_REQUESTS_COLS = {
   REQUEST_STATUS: 17,
   MENTOR_NOTES: 18,
   EXPEDITED_SHIPPING: 19,
-  IN_INVENTORY: 20
+  IN_INVENTORY: 20,
+  BUDGET_CATEGORY: 21,
+  BUILD_SEASON: 22,
+  REIMBURSED: 23
 };
 
 const ORDERS_COLS = {
@@ -158,6 +161,18 @@ function jsonResponse_(obj) {
 
 function handleDiscordRequest_(body) {
   try {
+    const budgetCategory = (body.budgetCategory || '').toString().trim();
+    const buildSeason    = (body.buildSeason    || '').toString().trim();
+    if (budgetCategory && !BUDGET_CATEGORIES[budgetCategory]) {
+      return jsonResponse_({ status: 'error', message: `Unknown category: ${budgetCategory}` });
+    }
+    if (buildSeason && BUILD_SEASONS.indexOf(buildSeason) < 0) {
+      return jsonResponse_({ status: 'error', message: `Unknown season: ${buildSeason}` });
+    }
+
+    // Pull the latest finance numbers before computing the budget reply
+    trySyncFinanceBudget_();
+
     const requestData = {
       timestamp: new Date(),
       requester: body.requester || 'Discord User',
@@ -168,7 +183,9 @@ function handleDiscordRequest_(body) {
       neededBy: body.neededBy || '',
       maxBudget: body.maxBudget || '',
       priority: body.priority || 'Medium',
-      notes: body.notes || ''
+      notes: body.notes || '',
+      budgetCategory: budgetCategory,
+      buildSeason: buildSeason
     };
 
     const { requestID, row } = createPartRequest_(requestData);
@@ -188,10 +205,10 @@ function handleDiscordRequest_(body) {
       notes: requestData.notes
     });
 
-    // Get budget snapshot to return with response
+    // Budget line remaining after this request, for the Discord reply
     let budgetSnapshot = null;
     try {
-      budgetSnapshot = getBudgetStatus_();
+      budgetSnapshot = budgetAfterRequest_(row);
     } catch (budgetErr) {
       Logger.log('[handleDiscordRequest_] Budget check failed (non-fatal): ' + budgetErr);
     }
@@ -247,7 +264,9 @@ function createPartRequest_(data) {
   sheet.getRange(nextRow, PART_REQUESTS_COLS.REQUEST_STATUS).setValue(STATUS.SUBMITTED);
   sheet.getRange(nextRow, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(data.notes);
   sheet.getRange(nextRow, PART_REQUESTS_COLS.EXPEDITED_SHIPPING).setValue(expeditedShipping);
-  
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.BUDGET_CATEGORY).setValue(data.budgetCategory || '');
+  sheet.getRange(nextRow, PART_REQUESTS_COLS.BUILD_SEASON).setValue(data.buildSeason || '');
+
   if (data.partLink) {
     try {
       enrichPartRequest(requestID, nextRow);
@@ -1134,6 +1153,31 @@ function onEdit(e) {
 
   const sheet = e.range.getSheet();
   if (sheet.getName() !== SHEET_NAMES.PART_REQUESTS) return;
+  if (e.range.getRow() < 2) return;
+
+  // Edits that change what a request costs or which budget it counts against
+  const budgetCols = [
+    PART_REQUESTS_COLS.QUANTITY,
+    PART_REQUESTS_COLS.EST_UNIT_PRICE,
+    PART_REQUESTS_COLS.TOTAL_EST_COST,
+    PART_REQUESTS_COLS.BUDGET_CATEGORY,
+    PART_REQUESTS_COLS.REIMBURSED
+  ];
+  const firstCol = e.range.getColumn();
+  const lastCol  = firstCol + e.range.getNumColumns() - 1;
+  if (budgetCols.some(c => c >= firstCol && c <= lastCol)) {
+    // A typed unit price or quantity updates Total Est Cost
+    if (firstCol <= PART_REQUESTS_COLS.EST_UNIT_PRICE && lastCol >= PART_REQUESTS_COLS.QUANTITY) {
+      for (let r = e.range.getRow(); r <= e.range.getLastRow(); r++) {
+        const price = parseFloat(sheet.getRange(r, PART_REQUESTS_COLS.EST_UNIT_PRICE).getValue()) || 0;
+        const qty   = parseFloat(sheet.getRange(r, PART_REQUESTS_COLS.QUANTITY).getValue()) || 1;
+        if (price > 0) sheet.getRange(r, PART_REQUESTS_COLS.TOTAL_EST_COST).setValue(price * qty);
+      }
+    }
+    refreshAllBudgetStatuses_(sheet);
+    return;
+  }
+
   if (e.range.getColumn() !== PART_REQUESTS_COLS.REQUEST_STATUS) return;
   if (e.range.getNumRows() !== 1 || e.range.getNumColumns() !== 1) return;
 
@@ -1397,46 +1441,175 @@ function cleanupEmptyRows() {
 
 /******************************************************
  * BUDGET FUNCTIONS
+ *
+ * Ground truth is the HMB Robotics budget spreadsheet (finance).
+ * syncFinanceBudget_() copies the FRC lines' Budget and Spent into the
+ * Budget tab; everything else reads that local copy, because the onEdit
+ * simple trigger is not allowed to open another spreadsheet.
+ *
+ * Remaining (per line) = Budget − Spent (finance) − PartBot pending
+ * PartBot pending      = this budget year's requests that are not
+ *                        cancelled/denied and not yet reimbursed
  ******************************************************/
 
+const FINANCE_BUDGET = {
+  SPREADSHEET_ID: '1JdWqI2GQKF-r4Fto-m7Z0ixFxtD084bQGVMzDKqw8SQ',
+  SHEET_PATTERN:  /^Master .*Budget$/,     // e.g. "Master 2027 Budget"
+  SECTION:        'FRC Expenses'
+};
+
+// Budget lines PartBot reads from the FRC section of the finance sheet
+const BUDGET_LINES = [
+  'Robot Hardware & Field Pieces',
+  'Tools & Supplies',
+  'Marketing/Spirit'
+];
+
+// Request category (Discord choice) → finance budget line
+const BUDGET_CATEGORIES = {
+  'Robot Part':       'Robot Hardware & Field Pieces',
+  'Field Piece':      'Robot Hardware & Field Pieces',
+  'Tool':             'Tools & Supplies',
+  'Supply':           'Tools & Supplies',
+  'Marketing/Spirit': 'Marketing/Spirit'
+};
+const DEFAULT_BUDGET_LINE = 'Robot Hardware & Field Pieces';  // older rows with no category
+
+const BUILD_SEASONS = ['In-season', 'Off-season'];
+
+// Budget tab layout (the whole tab is written by PartBot)
+const BUDGET_TAB = {
+  YEAR_LABEL:  'B1',
+  YEAR_START:  'B2',
+  YEAR_END:    'B3',
+  SOURCE:      'B4',
+  LAST_SYNCED: 'B5',
+  HEADER_ROW:  7,
+  FIRST_LINE_ROW: 8,      // one row per BUDGET_LINES entry
+  NUM_COLS:    6          // Line | Budget | Spent | Pending | Remaining | % Used
+};
+
+function budgetLineFor_(category) {
+  return BUDGET_CATEGORIES[(category || '').toString().trim()] || DEFAULT_BUDGET_LINE;
+}
+
+// Reads the finance spreadsheet and writes the FRC lines into the Budget tab
+function syncFinanceBudget_() {
+  const finance = SpreadsheetApp.openById(FINANCE_BUDGET.SPREADSHEET_ID);
+  const master  = finance.getSheets().find(s => FINANCE_BUDGET.SHEET_PATTERN.test(s.getName()));
+  if (!master) throw new Error('No "Master ... Budget" tab found in the finance spreadsheet');
+
+  const values = master.getDataRange().getValues();
+
+  // Title, e.g. "HMB Robotics 2027 Budget (9/1/26-8/31/27)"
+  const title = (values[0][0] || '').toString();
+  const range = title.match(/\((\d{1,2}\/\d{1,2}\/\d{2,4})\s*-\s*(\d{1,2}\/\d{1,2}\/\d{2,4})\)/);
+  if (!range) throw new Error(`Could not read the budget year from "${title}"`);
+  const yearStart = parseShortDate_(range[1]);
+  const yearEnd   = parseShortDate_(range[2]);
+  yearEnd.setHours(23, 59, 59);
+
+  // Find the FRC section, then the lines inside it (stop at the next "... Expenses" header)
+  const norm  = v => (v || '').toString().trim().toLowerCase();
+  const start = values.findIndex(r => norm(r[0]) === norm(FINANCE_BUDGET.SECTION));
+  if (start < 0) throw new Error(`"${FINANCE_BUDGET.SECTION}" not found on ${master.getName()}`);
+
+  const found = {};
+  for (let i = start + 1; i < values.length; i++) {
+    const label = norm(values[i][0]);
+    if (/expenses$/.test(label)) break;
+    const line = BUDGET_LINES.find(l => norm(l) === label);
+    if (line) found[line] = { budget: parseFloat(values[i][1]) || 0, spent: parseFloat(values[i][2]) || 0 };
+  }
+  const missing = BUDGET_LINES.filter(l => !found[l]);
+  if (missing.length) throw new Error(`Budget line(s) not found in ${FINANCE_BUDGET.SECTION}: ${missing.join(', ')}`);
+
+  const tab = getOrCreateBudgetTab_();
+  tab.getRange('A1:B5').setValues([
+    ['Budget Year', title.replace(/^HMB Robotics\s*/i, '')],
+    ['Year Start',  yearStart],
+    ['Year End',    yearEnd],
+    ['Synced From', `${finance.getName()} → ${master.getName()}`],
+    ['Last Synced', new Date()]
+  ]);
+  tab.getRange(BUDGET_TAB.HEADER_ROW, 1, 1, BUDGET_TAB.NUM_COLS).setValues([[
+    'Budget Line', 'Budget', 'Spent (Finance)', 'PartBot Pending', 'Remaining', '% Used'
+  ]]).setFontWeight('bold');
+  tab.getRange(BUDGET_TAB.FIRST_LINE_ROW, 1, BUDGET_LINES.length, 3)
+    .setValues(BUDGET_LINES.map(l => [l, found[l].budget, found[l].spent]));
+
+  Logger.log('[syncFinanceBudget_] Synced ' + JSON.stringify(found));
+}
+
+function parseShortDate_(text) {
+  const [m, d, y] = text.split('/').map(Number);
+  return new Date(y < 100 ? 2000 + y : y, m - 1, d);
+}
+
+function getOrCreateBudgetTab_() {
+  const ss  = SpreadsheetApp.getActive();
+  let tab   = ss.getSheetByName(SHEET_NAMES.BUDGET);
+  const fresh = !tab;
+  if (!tab) tab = ss.insertSheet(SHEET_NAMES.BUDGET);
+
+  // First sync replaces the old single-season layout
+  if (fresh || tab.getRange('A1').getValue() !== 'Budget Year') {
+    tab.clear();
+    tab.getRange('A1:A5').setFontWeight('bold');
+    tab.getRange(BUDGET_TAB.FIRST_LINE_ROW + BUDGET_LINES.length + 2, 1)
+      .setValue('This tab is written by PartBot. Change budget amounts in the HMB Robotics budget spreadsheet, then run 🎃 PartBot → 🔄 Sync Budget.')
+      .setFontStyle('italic');
+  }
+  return tab;
+}
+
+// Sync, but fall back to the last copy if finance can't be read (logged, non-fatal)
+function trySyncFinanceBudget_() {
+  try {
+    syncFinanceBudget_();
+    return true;
+  } catch (err) {
+    Logger.log('[trySyncFinanceBudget_] Using last synced budget: ' + err);
+    return false;
+  }
+}
+
 function getBudgetConfig_() {
-  const ss    = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(SHEET_NAMES.BUDGET);
+  const tab = SpreadsheetApp.getActive().getSheetByName(SHEET_NAMES.BUDGET);
+  if (!tab || tab.getRange('A1').getValue() !== 'Budget Year') {
+    throw new Error('Budget not synced yet. Run 🎃 PartBot → 🔄 Sync Budget.');
+  }
 
-  if (!sheet) throw new Error('Budget sheet not found.');
-
-  // Confirmed cell positions (debugBudgetV3 Aug 21 2026):
-  // B1  = Season Name
-  // B2  = Season Start
-  // B3  = Season End
-  // B6  = Total Allocated
-  // B8  = Event 1 Budget
-  // B9  = Event 2 Budget
-  // B10 = PartBot Orders Spent  ← script writes here
-  // B11 = Total Spent           ← script writes here
-  // B12 = Remaining             ← script writes here
-  // B13 = % Used                ← script writes here
-
-  const seasonName     = sheet.getRange('B1').getValue();
-  const seasonStart    = new Date(sheet.getRange('B2').getValue());
-  const seasonEnd      = new Date(sheet.getRange('B3').getValue());
-  const totalAllocated = parseFloat(sheet.getRange('B6').getValue()) || 0;
-  const event1Budget   = parseFloat(sheet.getRange('B8').getValue()) || 0;
-  const event2Budget   = parseFloat(sheet.getRange('B9').getValue()) || 0;
-  const nonPartsCost   = event1Budget + event2Budget;
-  const partsAvailable = totalAllocated - nonPartsCost;
+  const rows  = tab.getRange(BUDGET_TAB.FIRST_LINE_ROW, 1, BUDGET_LINES.length, 3).getValues();
+  const lines = {};
+  rows.forEach(([name, budget, spent]) => {
+    lines[name] = { budget: parseFloat(budget) || 0, spent: parseFloat(spent) || 0 };
+  });
 
   return {
-    seasonName,
-    seasonStart,
-    seasonEnd,
-    totalAllocated,
-    event1Budget,
-    event2Budget,
-    nonPartsCost,
-    partsAvailable,
-    openingBalance: 0
+    yearLabel:   tab.getRange(BUDGET_TAB.YEAR_LABEL).getValue(),
+    seasonStart: new Date(tab.getRange(BUDGET_TAB.YEAR_START).getValue()),   // budget year start
+    seasonEnd:   new Date(tab.getRange(BUDGET_TAB.YEAR_END).getValue()),     // budget year end
+    lastSynced:  tab.getRange(BUDGET_TAB.LAST_SYNCED).getValue(),
+    lines:       lines
   };
+}
+
+// Returns the budget line a row's cost counts against, or null if it doesn't count
+function pendingBudgetLine_(row, config) {
+  const id         = (row[PART_REQUESTS_COLS.REQUEST_ID - 1]     || '').toString();
+  const status     = (row[PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString();
+  const ts         = row[PART_REQUESTS_COLS.TIMESTAMP - 1];
+  const reimbursed = row[PART_REQUESTS_COLS.REIMBURSED - 1];
+
+  if (!id) return null;
+  if (status === STATUS.CANCELLED || status === STATUS.DENIED) return null;
+  if (reimbursed !== '' && reimbursed !== null) return null;   // now in finance "Spent"
+  if (ts) {
+    const reqDate = new Date(ts);
+    if (reqDate < config.seasonStart || reqDate > config.seasonEnd) return null;
+  }
+  return budgetLineFor_(row[PART_REQUESTS_COLS.BUDGET_CATEGORY - 1]);
 }
 
 function getBudgetStatus_() {
@@ -1444,102 +1617,118 @@ function getBudgetStatus_() {
   const ss     = SpreadsheetApp.getActive();
   const sheet  = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
 
-  const skipStatuses = [STATUS.CANCELLED, STATUS.DENIED];
+  const pending = {};
+  BUDGET_LINES.forEach(l => pending[l] = 0);
 
-  let partsSpend = 0;
   if (sheet) {
     const data = sheet.getDataRange().getValues();
     for (let i = 1; i < data.length; i++) {
-      const id      = (data[i][PART_REQUESTS_COLS.REQUEST_ID - 1]     || '').toString();
-      const status  = (data[i][PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString();
-      const ts      = data[i][PART_REQUESTS_COLS.TIMESTAMP - 1];
+      const line    = pendingBudgetLine_(data[i], config);
       const estCost = parseFloat(data[i][PART_REQUESTS_COLS.TOTAL_EST_COST - 1]) || 0;
-
-      if (!id) continue;
-      if (skipStatuses.some(s => status === s)) continue;
-      if (estCost <= 0) continue;
-
-      // Only count requests within offseason window
-      if (ts) {
-        const reqDate = new Date(ts);
-        if (reqDate < config.seasonStart || reqDate > config.seasonEnd) continue;
-      }
-
-      partsSpend += estCost;
+      if (line && estCost > 0) pending[line] += estCost;
     }
   }
 
-  const totalSpent  = config.nonPartsCost + partsSpend;
-  const remaining   = config.totalAllocated - totalSpent;
-  const percentUsed = config.totalAllocated > 0
-    ? (totalSpent / config.totalAllocated * 100) : 0;
+  const lines = BUDGET_LINES.map(name => {
+    const { budget, spent } = config.lines[name] || { budget: 0, spent: 0 };
+    const used = spent + pending[name];
+    return {
+      name,
+      budget,
+      spent,
+      pending:     pending[name],
+      remaining:   budget - used,
+      percentUsed: budget > 0 ? used / budget * 100 : 0
+    };
+  });
+
+  const sum   = key => lines.reduce((t, l) => t + l[key], 0);
+  const total = {
+    name:      'FRC Total',
+    budget:    sum('budget'),
+    spent:     sum('spent'),
+    pending:   sum('pending'),
+    remaining: sum('remaining')
+  };
+  total.percentUsed = total.budget > 0 ? (total.spent + total.pending) / total.budget * 100 : 0;
 
   try {
-    const budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET);
-    budgetSheet.getRange('B10').setValue(partsSpend);
-    budgetSheet.getRange('B11').setValue(totalSpent);
-    budgetSheet.getRange('B12').setValue(remaining);
-    budgetSheet.getRange('B13').setValue(percentUsed / 100);
+    const tab = ss.getSheetByName(SHEET_NAMES.BUDGET);
+    const out = lines.concat([total]).map(l => [l.name, l.budget, l.spent, l.pending, l.remaining, l.percentUsed / 100]);
+    tab.getRange(BUDGET_TAB.FIRST_LINE_ROW, 1, out.length, BUDGET_TAB.NUM_COLS).setValues(out);
+    tab.getRange(BUDGET_TAB.FIRST_LINE_ROW, 2, out.length, 4).setNumberFormat('$#,##0.00');
+    tab.getRange(BUDGET_TAB.FIRST_LINE_ROW, 6, out.length, 1).setNumberFormat('0.0%');
+    tab.getRange(BUDGET_TAB.FIRST_LINE_ROW + lines.length, 1, 1, BUDGET_TAB.NUM_COLS).setFontWeight('bold');
   } catch (e) {
     Logger.log('[getBudgetStatus_] Budget sheet update failed: ' + e);
   }
 
   return {
-    seasonName:     config.seasonName,
-    seasonStart:    config.seasonStart.toLocaleDateString(),
-    seasonEnd:      config.seasonEnd.toLocaleDateString(),
-    totalAllocated: config.totalAllocated,
-    event1Budget:   config.event1Budget,
-    event2Budget:   config.event2Budget,
-    nonPartsCost:   config.nonPartsCost,
-    partsAvailable: config.partsAvailable,
-    partBotSpend:   partsSpend,
-    totalSpent:     totalSpent,
-    remaining:      remaining,
-    percentUsed:    percentUsed.toFixed(1)
+    yearLabel:   config.yearLabel,
+    yearStart:   config.seasonStart.toLocaleDateString(),
+    yearEnd:     config.seasonEnd.toLocaleDateString(),
+    lastSynced:  config.lastSynced ? new Date(config.lastSynced).toISOString() : null,
+    lines:       lines,
+    total:       total
   };
 }
 
 function handleBudgetStatus_(body) {
   try {
+    const synced = trySyncFinanceBudget_();
+    refreshAllBudgetStatuses_();   // also updates the Budget tab
     const status = getBudgetStatus_();
-    const filled = Math.min(20, Math.round(parseFloat(status.percentUsed) / 5));
-    const empty  = 20 - filled;
-    const bar    = '█'.repeat(Math.max(0, filled)) + '░'.repeat(Math.max(0, empty));
-    return jsonResponse_({ status: 'ok', budget: status, bar: bar });
+    return jsonResponse_({ status: 'ok', synced: synced, budget: status });
   } catch (err) {
     Logger.log('[handleBudgetStatus_] Error: ' + err);
     return jsonResponse_({ status: 'error', message: err.toString() });
   }
 }
 
+function budgetBar_(percentUsed, width) {
+  const filled = Math.max(0, Math.min(width, Math.round(percentUsed / 100 * width)));
+  return '█'.repeat(filled) + '░'.repeat(width - filled);
+}
+
+function formatMoney_(v) {
+  const s = '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return v < 0 ? '-' + s : s;
+}
+
 function showBudgetStatus() {
   try {
     const status = getBudgetStatus_();
-    const filled = Math.round(parseFloat(status.percentUsed) / 5);
-    const empty  = 20 - filled;
-    const bar    = '█'.repeat(Math.max(0, filled)) + '░'.repeat(Math.max(0, empty));
-    const fmt    = v => '$' + parseFloat(v).toLocaleString('en-US', {
-      minimumFractionDigits: 2,
-      maximumFractionDigits: 2
-    });
+    const block  = l =>
+      `${l.name}\n` +
+      `  Budget ${formatMoney_(l.budget)} · Spent ${formatMoney_(l.spent)} · Pending ${formatMoney_(l.pending)}\n` +
+      `  Remaining ${formatMoney_(l.remaining)}   [${budgetBar_(l.percentUsed, 20)}] ${l.percentUsed.toFixed(1)}%`;
 
-    SpreadsheetApp.getUi().alert('💰 Budget Status',
-      `Season: ${status.seasonName}\n` +
-      `${status.seasonStart} → ${status.seasonEnd}\n\n` +
-      `Total Budget:          ${fmt(status.totalAllocated)}\n` +
-      `Event 1 (non-parts):   ${fmt(status.event1Budget)}\n` +
-      `Event 2 (non-parts):   ${fmt(status.event2Budget)}\n` +
-      `PartBot Orders+Reqs:   ${fmt(status.partBotSpend)}\n` +
-      `─────────────────────────────\n` +
-      `Total Spent:           ${fmt(status.totalSpent)} (${status.percentUsed}%)\n` +
-      `Remaining:             ${fmt(status.remaining)}\n\n` +
-      `[${bar}] ${status.percentUsed}%`,
+    SpreadsheetApp.getUi().alert('💰 FRC Budget',
+      `${status.yearLabel}\n\n` +
+      status.lines.map(block).join('\n\n') + '\n\n' +
+      block(status.total) + '\n\n' +
+      'Spent = logged by finance. Pending = PartBot requests not yet reimbursed.\n' +
+      `Last synced: ${status.lastSynced ? new Date(status.lastSynced).toLocaleString() : 'never'}`,
       SpreadsheetApp.getUi().ButtonSet.OK
     );
   } catch (err) {
     SpreadsheetApp.getUi().alert('❌ Error', err.toString(), SpreadsheetApp.getUi().ButtonSet.OK);
   }
+}
+
+// Menu + hourly trigger: pull latest finance numbers and recompute
+function syncBudget(e) {
+  syncFinanceBudget_();
+  ensureBudgetSyncTrigger_();
+  refreshAllBudgetStatuses_();
+  if (!e) {   // menu click (the hourly trigger passes an event and has no UI)
+    SpreadsheetApp.getUi().alert('🔄 Budget Synced', 'Budget amounts and finance "Spent" updated from the HMB Robotics budget spreadsheet.', SpreadsheetApp.getUi().ButtonSet.OK);
+  }
+}
+
+function ensureBudgetSyncTrigger_() {
+  const exists = ScriptApp.getProjectTriggers().some(t => t.getHandlerFunction() === 'syncBudget');
+  if (!exists) ScriptApp.newTrigger('syncBudget').timeBased().everyHours(1).create();
 }
 
 /******************************************************
@@ -1611,89 +1800,57 @@ function refreshAllBudgetStatuses_(sheet) {
     if (!sheet) sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
     if (!sheet) return;
 
-    // Get base budget — requests below are the parts spend (same rule as getBudgetStatus_)
-    const config        = getBudgetConfig_();
-    const baseRemaining = config.totalAllocated - config.nonPartsCost;
+    // Each budget line starts from Budget − finance Spent, then counts down
+    // through its pending requests (oldest first = first to reserve budget)
+    const config  = getBudgetConfig_();
+    const running = {};
+    BUDGET_LINES.forEach(l => {
+      const { budget, spent } = config.lines[l] || { budget: 0, spent: 0 };
+      running[l] = budget - spent;
+    });
 
-    Logger.log(`[refreshAllBudgetStatuses_] Base remaining: ${baseRemaining}`);
-
-    // Read all rows
-    const data    = sheet.getDataRange().getValues();
-    const lastCol = sheet.getLastColumn();
-
-    // Skip statuses that don't consume budget
-    const skipStatuses = [
-      STATUS.CANCELLED,
-      STATUS.DENIED
-    ];
-
-    // Collect active requests with prices, sorted by timestamp
+    const data       = sheet.getDataRange().getValues();
     const activeRows = [];
+    const reimbursed = [];
+
     for (let i = 1; i < data.length; i++) {
-      const id        = (data[i][PART_REQUESTS_COLS.REQUEST_ID - 1]     || '').toString();
-      const status    = (data[i][PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString();
-      const timestamp = data[i][PART_REQUESTS_COLS.TIMESTAMP - 1];
-      const estCost   = parseFloat(data[i][PART_REQUESTS_COLS.TOTAL_EST_COST - 1]) || 0;
-
-      if (!id) continue;
-      if (skipStatuses.some(s => status === s)) continue;
-
-      // Only count requests within season window
-      if (timestamp) {
-        const reqDate = new Date(timestamp);
-        if (reqDate < config.seasonStart || reqDate > config.seasonEnd) continue;
-      }
-
-      activeRows.push({
-        rowIndex:  i + 1,    // 1-based sheet row
-        id:        id,
-        status:    status,
-        timestamp: timestamp ? new Date(timestamp) : new Date(0),
-        estCost:   estCost
-      });
-    }
-
-    // Sort by timestamp ascending (oldest first = first to reserve budget)
-    activeRows.sort((a, b) => a.timestamp - b.timestamp);
-
-    // Calculate running budget decrement
-    let running = baseRemaining;
-
-    for (const req of activeRows) {
-      const costHere = req.estCost;
-
-      if (costHere <= 0) {
-        // No price — write placeholder
-        sheet.getRange(req.rowIndex, PART_REQUESTS_COLS.BUDGET_STATUS)
-          .setValue('⚪ No price yet');
+      const line = pendingBudgetLine_(data[i], config);
+      if (!line) {
+        const r = data[i][PART_REQUESTS_COLS.REIMBURSED - 1];
+        if (data[i][PART_REQUESTS_COLS.REQUEST_ID - 1] && r !== '' && r !== null) reimbursed.push(i + 1);
         continue;
       }
-
-      running -= costHere;
-
-      const pctRemaining = config.totalAllocated > 0
-        ? (running / config.totalAllocated * 100)
-        : 100;
-
-      const fmt = v => '$' + Math.abs(v).toLocaleString('en-US', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
+      const timestamp = data[i][PART_REQUESTS_COLS.TIMESTAMP - 1];
+      activeRows.push({
+        rowIndex:  i + 1,    // 1-based sheet row
+        id:        data[i][PART_REQUESTS_COLS.REQUEST_ID - 1],
+        line:      line,
+        timestamp: timestamp ? new Date(timestamp) : new Date(0),
+        estCost:   parseFloat(data[i][PART_REQUESTS_COLS.TOTAL_EST_COST - 1]) || 0
       });
-
-      let statusText;
-      if (running < 0) {
-        statusText = `🔴 -${fmt(running)} over budget`;
-      } else if (pctRemaining <= 10) {
-        statusText = `🟡 ${fmt(running)} remaining`;
-      } else {
-        statusText = `🟢 ${fmt(running)} remaining`;
-      }
-
-      sheet.getRange(req.rowIndex, PART_REQUESTS_COLS.BUDGET_STATUS)
-        .setValue(statusText);
-
-      Logger.log(`[refreshAllBudgetStatuses_] ${req.id}: -${fmt(costHere)} → ${statusText}`);
     }
+
+    activeRows.sort((a, b) => a.timestamp - b.timestamp);
+
+    for (const req of activeRows) {
+      let statusText;
+      if (req.estCost <= 0) {
+        statusText = '⚪ No price yet';
+      } else {
+        running[req.line] -= req.estCost;
+        const left   = running[req.line];
+        const budget = (config.lines[req.line] || {}).budget || 0;
+        const pct    = budget > 0 ? left / budget * 100 : 100;
+
+        if (left < 0)        statusText = `🔴 ${formatMoney_(-left)} over · ${req.line}`;
+        else if (pct <= 10)  statusText = `🟡 ${formatMoney_(left)} left · ${req.line}`;
+        else                 statusText = `🟢 ${formatMoney_(left)} left · ${req.line}`;
+      }
+      sheet.getRange(req.rowIndex, PART_REQUESTS_COLS.BUDGET_STATUS).setValue(statusText);
+    }
+
+    reimbursed.forEach(r =>
+      sheet.getRange(r, PART_REQUESTS_COLS.BUDGET_STATUS).setValue('💵 Reimbursed (in finance Spent)'));
 
     // Keep Budget tab totals in sync with Column P
     getBudgetStatus_();
@@ -1701,6 +1858,23 @@ function refreshAllBudgetStatuses_(sheet) {
   } catch (err) {
     Logger.log('[refreshAllBudgetStatuses_] Error: ' + err);
   }
+}
+
+// Remaining for one budget line after a given request (used for the Discord reply)
+function budgetAfterRequest_(requestRow) {
+  const sheet  = SpreadsheetApp.getActive().getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  const row    = sheet.getRange(requestRow, 1, 1, sheet.getLastColumn()).getValues()[0];
+  const status = getBudgetStatus_();
+  const line   = budgetLineFor_(row[PART_REQUESTS_COLS.BUDGET_CATEGORY - 1]);
+  const info   = status.lines.find(l => l.name === line);
+
+  return {
+    line:        line,
+    requestCost: parseFloat(row[PART_REQUESTS_COLS.TOTAL_EST_COST - 1]) || 0,
+    budget:      info.budget,
+    remaining:   info.remaining,
+    percentUsed: info.percentUsed
+  };
 }
 
 // Menu-callable version
@@ -1748,9 +1922,22 @@ function setupDropdownWorkflow() {
   }
 
   sheet.getRange(2, PART_REQUESTS_COLS.IN_INVENTORY, lastRow - 1, 1).setHorizontalAlignment('center');
+
+  // Budget columns: category and season dropdowns, reimbursed date
+  sheet.getRange(1, PART_REQUESTS_COLS.BUDGET_CATEGORY, 1, 3)
+    .setValues([['Category', 'Build Season', 'Reimbursed']]);
+  sheet.getRange(2, PART_REQUESTS_COLS.BUDGET_CATEGORY, lastRow - 1, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(Object.keys(BUDGET_CATEGORIES), true).setAllowInvalid(false).build());
+  sheet.getRange(2, PART_REQUESTS_COLS.BUILD_SEASON, lastRow - 1, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(BUILD_SEASONS, true).setAllowInvalid(false).build());
+  sheet.getRange(2, PART_REQUESTS_COLS.REIMBURSED, lastRow - 1, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireDate().setAllowInvalid(false)
+      .setHelpText('Date finance logged this expense. Leave blank until then.').build())
+    .setNumberFormat('m/d/yyyy');
+
   setupConditionalFormatting_(sheet, lastRow);
 
-  SpreadsheetApp.getUi().alert('✅ Setup Complete!', 'Dropdown workflow, inventory indicator, and row highlighting configured successfully!', SpreadsheetApp.getUi().ButtonSet.OK);
+  SpreadsheetApp.getUi().alert('✅ Setup Complete!', 'Dropdown workflow, inventory indicator, budget columns, and row highlighting configured successfully!', SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
 function setupConditionalFormatting_(sheet, lastRow) {
@@ -1788,6 +1975,7 @@ function onOpen() {
     .addItem('📦 Retry Add to Inventory',         'retryAddToInventory')
     .addItem('🔍 Find Missing Inventory Items',   'findMissingInventoryItems')
     .addItem('💰 Refresh All Budget Statuses',    'refreshAllBudgetStatuses')
+    .addItem('🔄 Sync Budget',                    'syncBudget')
     .addToUi();
 }
 

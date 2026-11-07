@@ -16,6 +16,8 @@ const API_ACTIONS = {
   INVENTORY: 'inventory',
   ORDER_STATUS: 'orderStatus',
   OPEN_ORDERS: 'openOrders',
+  CANCEL_REQUEST: 'cancelRequest',
+  BUDGET_STATUS: 'budgetStatus',
   HEALTH: 'health'
 };
 
@@ -67,7 +69,9 @@ const REQUEST_FIELDS = {
   MAX_BUDGET: 'maxBudget',
   PRIORITY: 'priority',
   NOTES: 'notes',
-  
+  BUDGET_CATEGORY: 'budgetCategory',
+  BUILD_SEASON: 'buildSeason',
+
   // Inventory lookup fields
   SKU: 'sku',
   SEARCH: 'search',
@@ -137,6 +141,15 @@ const PRIORITIES = {
   MEDIUM: 'Medium',
   LOW: 'Low'
 };
+
+/******************************************************
+ * BUDGET CATEGORIES & BUILD SEASONS
+ * Category → finance budget line mapping lives in Code.js (BUDGET_CATEGORIES)
+ ******************************************************/
+
+const BUDGET_CATEGORIES = ['Robot Part', 'Field Piece', 'Tool', 'Supply', 'Marketing/Spirit'];
+
+const BUILD_SEASONS = ['In-season', 'Off-season'];
 
 /******************************************************
  * REQUEST STATUS VALUES
@@ -230,6 +243,8 @@ if (typeof module !== 'undefined' && module.exports) {
     RESPONSE_FIELDS,
     SUBSYSTEMS,
     PRIORITIES,
+    BUDGET_CATEGORIES,
+    BUILD_SEASONS,
     REQUEST_STATUS,
     ORDER_STATUS,
     SHIPPING_METHODS,
