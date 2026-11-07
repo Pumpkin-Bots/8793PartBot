@@ -1,6 +1,6 @@
 # 8793PartBot — Project Context
 
-Handoff context for feature development. Treat this as project guidance, but verify behavior against the checked-in source before changing it. The local checkout was clean on `main` at commit `87694fc` when this file was created; re-check git state before working or deploying.
+Handoff context for feature development. Treat this as project guidance, but verify behavior against the checked-in source before changing it. Re-check git state (and the live Apps Script, see below) before working or deploying.
 
 ## What This Is
 
@@ -55,14 +55,15 @@ Verified in the local checkout:
 └── CLAUDE.md
 ```
 
-The README and older handoffs may describe `Code.gs`, `SharedConstants.gs`, `.env.example`, or `check-commands.js`; those files were not present in the checked-out tree when this file was written. The tracked Apps Script source is `Code.js`. Verify how that maps to the live Apps Script project before pushing or copying code. `apps-script/.clasp.json` already exists; inspect it and confirm its target rather than cloning over it.
+Older handoffs may describe `Code.gs`, `SharedConstants.gs`, `.env.example`, or `check-commands.js`; none are in this repo (`check-commands.js` exists only on the VM, untracked). The tracked Apps Script source is `Code.js`, mapped to the live project by `apps-script/.clasp.json`. The bot's `.env` needs `DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, `APPS_SCRIPT_URL`.
 
 ## Environments and Deployment
 
 - **Discord bot VM:** `pumpkinbots_hmbrobotics_org@discord-bot-vm`, working directory `~/8793PartBot/discord-bot/`, PM2 process `discord-bot`.
   Until 2026-11-07 the VM ran a clone of the personal repo `pureh2oo/8793PartBot` (bot.js at the repo root, with uncommitted edits), not this repo. It was moved to a clone of `Pumpkin-Bots/8793PartBot`; the old folder is kept as `~/8793PartBot-personal` for rollback. Never embed tokens in the VM's git remote URL; this repo is public and pulls need none.
 - **Bot deployment:** commit and push locally, then on the VM pull the intended commit, restart `discord-bot`, and verify command registration in Discord.
-- **Apps Script:** project is bound to the spreadsheet. Updates have historically been copied into the browser editor. The repository now contains `.clasp.json`; verify the target and establish a safe `clasp status` / push workflow before changing how deployment is done. If `doPost` changes, deploy a new web-app version and confirm the bot points to the active deployment URL.
+- **Apps Script:** bound to the spreadsheet and deployed with clasp (logged in as the pumpkinbots account). Before every `clasp push`, `clasp pull` into a scratch folder and diff against the committed `Code.js`; the live project was once ~180 lines ahead of git from browser-editor edits. After pushing, update the existing web-app deployment in place (`clasp deployments`, then `clasp deploy -i <id>`) so the bot's URL doesn't change. The web app runs as the deploying user with anonymous access, so don't publish the deployment ID or URL in this public repo.
+- **Budget access:** the deploying account must be able to read the HMB Robotics budget spreadsheet; run `syncBudget` once from the editor as that account to approve access and create the hourly trigger.
 - **Spreadsheet:** `8793 FullInventory and PartPurchasing`.
 
 Before pulling on the VM, check both the worktree and local-only commits. A past SKU-field debugging session was caused by a local commit that had not been pushed:
@@ -72,7 +73,7 @@ git status
 git log --oneline origin/main..HEAD
 ```
 
-Do not assume a local feature is deployed merely because it works in the local checkout. After bot changes, verify the registered Discord command schema; `check-commands.js` was not present in the verified checkout, so do not assume that helper exists.
+Do not assume a local feature is deployed merely because it works in the local checkout. After bot changes, verify the registered Discord command schema (commands re-register on startup). The bot's dependencies must all be in `discord-bot/package.json`: the VM installs with `npm ci`, and `dotenv` was once missing because it had been installed by hand.
 
 ## Secrets
 
@@ -129,6 +130,8 @@ Ground truth is the finance spreadsheet **HMB Robotics 2027 Budget** (ID in `FIN
 - Remaining per line = Budget − finance Spent − PartBot pending. Pending = budget-year requests not Cancelled/Denied and with **Reimbursed (W)** blank. Mentors fill W when finance logs the expense, to avoid double counting.
 - Category (U) maps to a line via `BUDGET_CATEGORIES`; blank (older rows) counts as Robot Hardware. Build Season (V) is recorded for reporting only.
 - The web app runs as the deploying user, so that account needs Viewer access to the finance spreadsheet.
+- `getValues()` rows stop at the sheet's last used column, so a new trailing column (like W) can read as `undefined`, not `''`. Use `isReimbursed_()`-style checks; this once marked every request as reimbursed.
+- Purchasing and reimbursement workflow (keeps the numbers accurate) is documented in the README; the key mentor duty is entering the Reimbursed date (W) once finance logs an expense.
 
 ## Implemented Behavior to Preserve
 

@@ -158,6 +158,22 @@ Supports:
 - **❌ Denied** → Prompts for reason, highlights row red
 - **🚫 Cancelled** → Student-initiated cancellation, grays out row
 
+### 💵 Purchasing & Reimbursement Workflow (keeps the budget accurate)
+A request counts as **PartBot pending** from the moment it's requested until it's marked reimbursed; after that it's in finance's **Spent**.
+
+| # | Step | Who | Where | Budget effect |
+|---|---|---|---|---|
+| 1 | Request the part with `/requestpart`, picking **category** and **season** and linking the exact product page | Student | Discord | Counts as pending (if a price was found) |
+| 2 | Make sure it has a price; type it in **Est Unit Price (M)** if blank (always for McMaster) | Mentor | Part Requests | No price = counts as $0. Typing M updates Total Est Cost (N) and the budget |
+| 3 | Review: ✅ Approved or ❌ Denied | Mentor | Part Requests | Denied drops out of pending |
+| 4 | Order it, set 🛒 Ordered | Mentor | Vendor, Part Requests | Still pending |
+| 5 | Receive it, set 📦 Received → ✔️ Complete | Mentor | Part Requests | Still pending |
+| 6 | Submit for reimbursement (receipts + BGCC check request form, emailed to finance and BGCC; see the budget sheet's "Expense Process" tab). **List the request IDs in the email.** | Purchaser | Email | No change |
+| 7 | Log the expense in "2027 Detailed Expenses" (ideally with the request IDs in **Details**) | Finance | HMB Robotics budget sheet | Moves into **Spent**; counts twice until step 8 |
+| 8 | Enter the date finance logged it in **Reimbursed (W)** for each request in that reimbursement | Mentor | Part Requests | Leaves pending; accurate again |
+
+**Tips:** do step 8 soon after step 7 (the only time the budget is off, and it's always too high). Pending uses the estimated cost; finance records the actual amount with tax and shipping, so update Column M at order time if the real price differs a lot. Purchases made outside PartBot only appear once finance logs them. Category (U) decides which budget line a request counts against and can be corrected anytime. `/cancelrequest` removes a request from pending automatically.
+
 ---
 
 ## Architecture
@@ -165,7 +181,7 @@ Supports:
 Discord Slash Commands
         ↓
 Node.js Discord Bot (bot.js)
-  - Command handling (/requestpart with SKU field, /cancelrequest, etc.)
+  - Command handling (/requestpart with SKU, category, season; /budgetstatus; /cancelrequest, etc.)
   - User interaction
   - HTTP requests to Apps Script
   - SKU parameter extraction and validation
@@ -178,9 +194,13 @@ Google Apps Script (apps-script/Code.js)
   - Security checks (cancellation permissions)
         ↓
 Google Sheets (Database)
-  - Part Requests (pending items with user/AI SKUs)
+  - Part Requests (pending items with user/AI SKUs, budget category, reimbursed date)
   - Orders (approved/ordered items)
   - Inventory (on-hand stock)
+  - Budget (synced copy of the FRC Expenses lines + PartBot pending)
+        ↑ hourly / on each Discord command
+HMB Robotics budget spreadsheet (finance's ground truth, read-only)
+  - Master ... Budget → FRC Expenses: Budget and Spent per line
         ↓
 Google Gemini API (gemini-2.5-flash)
   - Part name extraction from URLs
@@ -466,12 +486,14 @@ pm2 restart discord-bot
 - [x] Student self-service cancellation ✅
 - [x] AI enrichment with Gemini API ✅
 - [x] Location-based inventory search ✅
+- [x] Live FRC budget from the HMB Robotics budget sheet: `/budgetstatus`, per-line remaining on `/requestpart`, Reimbursed tracking (November 2026) ✅
+- [x] Reliable WCP/Shopify price extraction and 💲 Fill Missing Prices (November 2026) ✅
 
 ### Planned Features
 - [ ] Vendor API integrations (REV, AndyMark direct ordering)
 - [ ] Automatic cart building
 - [ ] Inventory QR code scanning (mobile app)
-- [ ] Budget dashboards and spending analytics
+- [ ] Spending analytics (by subsystem, season, vendor)
 - [ ] Web dashboard for mentors
 - [ ] Predictive part ordering based on historical data
 - [ ] Multi-team support
@@ -483,6 +505,9 @@ pm2 restart discord-bot
   - **Workaround:** Use `sku` parameter for multi-variant pages
 - Date formatting varies by locale
 - Rate limiting on Gemini API (15 requests/minute on free tier)
+- McMaster-Carr pages load prices with JavaScript, so PartBot can't read them
+  - **Workaround:** a mentor types the price in Est Unit Price (Column M)
+- Prices for `?variant=` links use the product's default price, so treat them as estimates
 
 ---
 
@@ -500,11 +525,27 @@ We welcome contributions from other FRC teams! To contribute:
 ```bash
 git clone https://github.com/YOUR_USERNAME/8793PartBot.git
 cd 8793PartBot/discord-bot
-npm install
-cp .env.example .env
-# Edit .env with your credentials
+npm ci
+# Create .env with: DISCORD_TOKEN, CLIENT_ID, GUILD_ID, APPS_SCRIPT_URL
 node bot.js
 ```
+
+### Deploying
+**Discord bot (VM):** the VM runs a clone of this repo at `~/8793PartBot/discord-bot` under PM2. No token is needed to pull (the repo is public; never put a token in the remote URL).
+```bash
+cd ~/8793PartBot && git pull
+cd discord-bot && npm ci
+pm2 restart discord-bot
+pm2 logs discord-bot --lines 15 --nostream   # expect "Slash commands registered" and "Logged in"
+```
+Slash commands re-register on startup.
+
+**Apps Script:** deployed with [clasp](https://github.com/google/clasp) from `apps-script/`.
+1. Check the live project hasn't been edited in the browser since the last push: `clasp pull` into a scratch folder (copy `.clasp.json` there) and diff against `Code.js`. Bring any browser edits into git first.
+2. `clasp push` updates the code the spreadsheet runs (menus, onEdit, triggers).
+3. Discord calls a versioned **web-app deployment**, so also update it in place: `clasp deployments` to find the active one, then `clasp deploy -i <deploymentId> -d "<description>"`. The URL stays the same.
+
+**First-time budget setup:** run `syncBudget` once from the Apps Script editor as the account that owns the web-app deployment (approves access to the budget sheet and creates the hourly sync trigger), then **🎃 PartBot → ⚙️ Setup Dropdown Workflow** for the Category / Build Season / Reimbursed columns.
 
 ---
 
