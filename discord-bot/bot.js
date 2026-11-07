@@ -139,12 +139,8 @@ const commands = [
     ),
 
   new SlashCommandBuilder()
-    .setName('requestbudget')
-    .setDescription('Full FRC budget by line: spent, pending, and remaining'),
-
-  new SlashCommandBuilder()
     .setName('budgetstatus')
-    .setDescription('FRC budget summary: total budget, total spent, and remaining'),
+    .setDescription('FRC budget: total spent and remaining, plus every FRC Expenses line'),
 
   new SlashCommandBuilder()
     .setName('cancelrequest')
@@ -207,9 +203,6 @@ client.on('interactionCreate', async interaction => {
     switch (interaction.commandName) {
       case 'requestpart':
         await handleRequestPart(interaction);
-        break;
-      case 'requestbudget':
-        await handleRequestBudget(interaction);
         break;
       case 'budgetstatus':
         await handleBudgetStatus(interaction);
@@ -303,50 +296,8 @@ async function handleRequestPart(interaction) {
   }
 }
 
-async function handleRequestBudget(interaction) {
-  await interaction.deferReply({ ephemeral: true });
-
-  try {
-    const response = await axios.post(APPS_SCRIPT_URL, { action: 'budgetStatus' });
-    const data = response.data;
-
-    if (data.status !== 'ok') {
-      return interaction.editReply(`❌ Error: ${data.message || 'Unknown error'}`);
-    }
-
-    const budget = data.budget;
-    const lines = [`💰 **FRC Budget: ${budget.yearLabel}**`, ''];
-
-    for (const l of budget.lines) {
-      const left = l.remaining < 0
-        ? `🔴 **${formatMoney(-l.remaining)} over**`
-        : `**${formatMoney(l.remaining)} left** of ${formatMoney(l.budget)}`;
-      lines.push(`**${l.name}**`);
-      lines.push(`\`${budgetBar(l.percentUsed)}\` ${l.percentUsed.toFixed(0)}% · ${left}`);
-      // Pending only applies to lines PartBot purchases count against
-      lines.push(l.partBot
-        ? `Spent ${formatMoney(l.spent)} · Pending ${formatMoney(l.pending)}`
-        : `Spent ${formatMoney(l.spent)}`);
-      lines.push('');
-    }
-
-    const t = budget.total;
-    lines.push(`**FRC total:** ${formatMoney(t.remaining)} left of ${formatMoney(t.budget)} (${t.percentUsed.toFixed(0)}% used)`);
-    lines.push('_Spent = logged by finance. Pending = PartBot requests not yet reimbursed._');
-    if (!data.synced) {
-      lines.push(`⚠️ _Couldn't reach the finance sheet; showing numbers from ${formatDate(budget.lastSynced, 'the last sync')}._`);
-    }
-
-    return interaction.editReply(lines.join('\n'));
-
-  } catch (err) {
-    console.error('[handleRequestBudget] Error:', err.message);
-    return interaction.editReply('❌ Failed to contact Google Sheets');
-  }
-}
-
 async function handleBudgetStatus(interaction) {
-  await interaction.deferReply({ ephemeral: false });   // posted to the channel, as before
+  await interaction.deferReply({ ephemeral: false });   // posted to the channel
 
   try {
     const response = await axios.post(APPS_SCRIPT_URL, { action: 'budgetStatus' });
@@ -365,6 +316,7 @@ async function handleBudgetStatus(interaction) {
     if (t.remaining < 0) health = '🔴 Over budget';
     else if (pctRemaining <= 10) health = '🟡 Under 10% left';
 
+    // FRC total first, then every FRC Expenses line
     const lines = [
       `💰 **FRC Budget Status: ${budget.yearLabel}**`,
       '',
@@ -372,14 +324,33 @@ async function handleBudgetStatus(interaction) {
       `Total Spent:   **${formatMoney(totalSpent)}** (${formatMoney(t.spent)} logged by finance + ${formatMoney(t.pending)} pending in PartBot)`,
       `Remaining:     **${formatMoney(t.remaining)}** (${pctRemaining.toFixed(1)}%)`,
       `\`${budgetBar(t.percentUsed, 20)}\` ${health}`,
-      '',
-      '_Use /requestbudget for the breakdown by budget line._'
+      ''
     ];
+
+    for (const l of budget.lines) {
+      const left = l.remaining < 0
+        ? `🔴 **${formatMoney(-l.remaining)} over**`
+        : `**${formatMoney(l.remaining)} left** of ${formatMoney(l.budget)}`;
+      lines.push(`**${l.name}**`);
+      lines.push(`\`${budgetBar(l.percentUsed)}\` ${l.percentUsed.toFixed(0)}% · ${left}`);
+      // Pending only applies to lines PartBot purchases count against
+      lines.push(l.partBot
+        ? `Spent ${formatMoney(l.spent)} · Pending ${formatMoney(l.pending)}`
+        : `Spent ${formatMoney(l.spent)}`);
+      lines.push('');
+    }
+
+    lines.push('_Spent = logged by finance. Pending = PartBot requests not yet reimbursed._');
     if (!data.synced) {
       lines.push(`⚠️ _Couldn't reach the finance sheet; showing numbers from ${formatDate(budget.lastSynced, 'the last sync')}._`);
     }
 
-    return interaction.editReply(lines.join('\n'));
+    // Discord rejects messages over 2000 characters
+    let message = lines.join('\n');
+    if (message.length > 1900) {
+      message = message.substring(0, 1900) + '\n\n... (truncated)';
+    }
+    return interaction.editReply(message);
 
   } catch (err) {
     console.error('[handleBudgetStatus] Error:', err.message);

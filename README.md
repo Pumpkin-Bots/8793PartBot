@@ -76,8 +76,7 @@ Students request parts using intuitive slash commands:
 
 **All commands:**
 - `/requestpart` - Submit a new part request (now with optional `sku` field!)
-- `/requestbudget` - Show the current FRC budget: spent, pending, and remaining
-- `/budgetstatus` - FRC budget summary: total budget, total spent, remaining $ and %
+- `/budgetstatus` - FRC budget: total spent and remaining ($ and %), plus every FRC Expenses line
 - `/cancelrequest` - Cancel your own request
 - `/inventory` - Search inventory by SKU or keyword
 - `/openorders` - View all pending orders and denied requests
@@ -95,7 +94,7 @@ Every request counts against a line of the **HMB Robotics budget spreadsheet** (
 **Remaining = Budget − Spent (logged by finance) − PartBot pending.** Pending is this budget year's requests that aren't cancelled, denied, or reimbursed. When finance logs an expense, a mentor enters the date in the request's **Reimbursed** column so it isn't counted twice.
 
 - `/requestpart` replies with what's left in that budget line after your request
-- `/requestbudget` shows every line under FRC Expenses in the budget sheet (Competition Registration, Travel & Food, Robot Hardware & Field Pieces, Marketing/Spirit, Tools & Supplies) with spent, pending, and remaining (private reply). Lines PartBot purchases don't use show finance's numbers only.
+- `/budgetstatus` shows the FRC total and every line under FRC Expenses in the budget sheet (Competition Registration, Travel & Food, Robot Hardware & Field Pieces, Marketing/Spirit, Tools & Supplies) with spent, pending, and remaining. Lines PartBot purchases don't use show finance's numbers only.
 - PartBot copies the budget amounts into its **Budget** tab hourly, on each Discord command, and from **🎃 PartBot → 🔄 Sync Budget**
 
 ### 🚫 Request Cancellation
@@ -242,17 +241,11 @@ The repository does not currently include `.env.example` or `SharedConstants.gs`
 6. Request ID returned (e.g., REQ-12345678)
 7. Discord shows what's left in the request's budget line after this purchase
 
-### `/requestbudget` - Current FRC Budget
-```
-/requestbudget
-```
-Shows every line under **FRC Expenses** in the HMB Robotics budget sheet (Competition Registration, Travel & Food, Robot Hardware & Field Pieces, Marketing/Spirit, Tools & Supplies, plus any line finance adds) with budget, spent (logged by finance), pending (PartBot requests not yet reimbursed), and remaining, plus the FRC total. Only you see the reply.
-
-### `/budgetstatus` - FRC Budget Summary
+### `/budgetstatus` - FRC Budget
 ```
 /budgetstatus
 ```
-One-glance total for everything under FRC Expenses: budget, total spent (logged by finance + pending in PartBot), and remaining in dollars and percent. Posted to the channel.
+Posted to the channel. Starts with the FRC total (budget, total spent = logged by finance + pending in PartBot, remaining in dollars and percent), then every line under **FRC Expenses** in the HMB Robotics budget sheet (Competition Registration, Travel & Food, Robot Hardware & Field Pieces, Marketing/Spirit, Tools & Supplies, plus any line finance adds) with budget, spent, pending, and remaining.
 
 **SKU field behavior:**
 - **With SKU:** `sku:WCP-0785` → Guaranteed correct, AI skips SKU extraction

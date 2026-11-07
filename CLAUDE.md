@@ -87,8 +87,7 @@ Never commit credentials or paste them into chat.
 The verified `bot.js` registers these guild-scoped commands through `Routes.applicationGuildCommands`:
 
 - `/requestpart`: subsystem, category, season (required), optional product link, SKU, quantity, max budget, priority, and notes
-- `/requestbudget`: FRC budget by line (private reply), via the `budgetStatus` action
-- `/budgetstatus`: FRC total budget, total spent, remaining $ and % (posted to the channel), same `budgetStatus` action
+- `/budgetstatus`: FRC total (budget, spent, remaining $ and %) followed by every FRC Expenses line, posted to the channel, via the `budgetStatus` action. It replaced a separate `/requestbudget` command.
 - `/cancelrequest`: request ID and optional reason
 - `/inventory`: exact SKU or keyword search
 - `/orderstatus`: request ID or order ID
