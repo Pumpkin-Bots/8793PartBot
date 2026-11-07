@@ -324,17 +324,6 @@ function sendProcurementNotification_(request) {
   }
 }
 
-function debugBudgetV3() {
-  const ss    = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName('Budget');
-  
-  for (let i = 1; i <= 14; i++) {
-    const a = sheet.getRange('A' + i).getValue();
-    const b = sheet.getRange('B' + i).getValue();
-    Logger.log(`Row ${i}: A="${a}" | B="${b}" (type: ${typeof b})`);
-  }
-}
-
 /******************************************************
  * AI ENRICHMENT SYSTEM - Gemini API
  ******************************************************/
@@ -1189,6 +1178,26 @@ function handleApproved(sheet, row) {
 }
 
 function handleOrdered(sheet, row) {
+  const ss        = SpreadsheetApp.getActive();
+  const requestID = sheet.getRange(row, PART_REQUESTS_COLS.REQUEST_ID).getValue();
+  const today     = new Date();
+
+  const ordersSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
+  if (ordersSheet) {
+    const orderRow = findOrderByRequestId(ordersSheet, requestID);
+    if (orderRow) {
+      // Only update existing order — never create new
+      const existingDate = ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_DATE).getValue();
+      if (!existingDate) {
+        ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_DATE).setValue(today);
+      }
+      ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_STATUS).setValue(STATUS.ORDERED);
+      Logger.log(`[handleOrdered] Updated order at row ${orderRow} for ${requestID}`);
+    } else {
+      Logger.log(`[handleOrdered] No linked order found for ${requestID} — skipping`);
+    }
+  }
+
   SpreadsheetApp.getActive().toast('🛒 Order status updated', 'Success', 3);
 }
 
@@ -1394,25 +1403,52 @@ function getBudgetConfig_() {
   };
 }
 
-function calculatePartBotSpend_(seasonStart, seasonEnd) {
+// All orders ever placed through PartBot (no date filter)
+function calculateAllTimeSpend_() {
   const ss          = SpreadsheetApp.getActive();
   const ordersSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
   if (!ordersSheet) return 0;
 
-  const data       = ordersSheet.getDataRange().getValues();
-  let totalSpend   = 0;
+  const data     = ordersSheet.getDataRange().getValues();
+  let totalSpend = 0;
 
   for (let i = 1; i < data.length; i++) {
     const row         = data[i];
-    const orderStatus = row[ORDERS_COLS.ORDER_STATUS - 1];
+    const orderStatus = (row[ORDERS_COLS.ORDER_STATUS - 1] || '').toString();
+    const finalPrice  = parseFloat(row[ORDERS_COLS.FINAL_UNIT_PRICE - 1]) || 0;
+    const totalCost   = parseFloat(row[ORDERS_COLS.TOTAL_COST - 1])       || 0;
+    const qtyOrdered  = parseFloat(row[ORDERS_COLS.QTY_ORDERED - 1])      || 0;
+
+    const isCountable = ['Ordered', 'Received', 'Complete', 'Approved']
+      .some(s => orderStatus.toLowerCase().includes(s.toLowerCase()));
+
+    if (!isCountable) continue;
+    totalSpend += totalCost > 0 ? totalCost : (finalPrice * qtyOrdered);
+  }
+
+  return totalSpend;
+}
+
+// Only offseason orders (4/15/2026+)
+function calculateOffseasonSpend_(seasonStart, seasonEnd) {
+  const ss          = SpreadsheetApp.getActive();
+  const ordersSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
+  if (!ordersSheet) return 0;
+
+  const data     = ordersSheet.getDataRange().getValues();
+  let totalSpend = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const row         = data[i];
+    const orderStatus = (row[ORDERS_COLS.ORDER_STATUS - 1] || '').toString();
     const orderDate   = new Date(row[ORDERS_COLS.ORDER_DATE - 1]);
     const finalPrice  = parseFloat(row[ORDERS_COLS.FINAL_UNIT_PRICE - 1]) || 0;
     const totalCost   = parseFloat(row[ORDERS_COLS.TOTAL_COST - 1])       || 0;
     const qtyOrdered  = parseFloat(row[ORDERS_COLS.QTY_ORDERED - 1])      || 0;
 
-    const statusValue  = orderStatus ? orderStatus.toString() : '';
-    const isCountable  = [STATUS.ORDERED, STATUS.RECEIVED, STATUS.COMPLETE]
-      .some(s => statusValue === s || statusValue.includes(s.replace(/[^\w\s]/g, '').trim()));
+    const isCountable = [STATUS.ORDERED, STATUS.RECEIVED, STATUS.COMPLETE]
+      .some(s => orderStatus === s || orderStatus.includes(
+        s.replace(/[^\w\s]/g, '').trim()));
 
     if (!isCountable) continue;
     if (!orderDate || isNaN(orderDate.getTime())) continue;
@@ -1424,25 +1460,14 @@ function calculatePartBotSpend_(seasonStart, seasonEnd) {
   return totalSpend;
 }
 
-function testBudgetResponse() {
-  const result = getBudgetStatus_();
-  Logger.log(JSON.stringify(result));
-}
-
 function getBudgetStatus_() {
-  const config       = getBudgetConfig_();
-  const partBotSpend = calculatePartBotSpend_(config.seasonStart, config.seasonEnd);
+  const config = getBudgetConfig_();
+  const ss     = SpreadsheetApp.getActive();
+  const sheet  = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
 
-  // Sum all active submitted/approved requests with prices within season
-  const ss    = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  const skipStatuses = [STATUS.CANCELLED, STATUS.DENIED];
 
-  const skipStatuses = [
-    STATUS.CANCELLED, STATUS.DENIED,
-    STATUS.ORDERED,   STATUS.RECEIVED, STATUS.COMPLETE
-  ];
-
-  let pendingSpend = 0;
+  let partsSpend = 0;
   if (sheet) {
     const data = sheet.getDataRange().getValues();
     for (let i = 1; i < data.length; i++) {
@@ -1461,25 +1486,23 @@ function getBudgetStatus_() {
         if (reqDate < config.seasonStart || reqDate > config.seasonEnd) continue;
       }
 
-      pendingSpend += estCost;
+      partsSpend += estCost;
     }
   }
 
-  const totalPartSpend = partBotSpend + pendingSpend;
-  const totalSpent     = config.nonPartsCost + totalPartSpend;
-  const remaining      = config.totalAllocated - totalSpent;
-  const percentUsed    = config.totalAllocated > 0
+  const totalSpent  = config.nonPartsCost + partsSpend;
+  const remaining   = config.totalAllocated - totalSpent;
+  const percentUsed = config.totalAllocated > 0
     ? (totalSpent / config.totalAllocated * 100) : 0;
 
-  // Update Budget tab calculated cells
   try {
     const budgetSheet = ss.getSheetByName(SHEET_NAMES.BUDGET);
-    budgetSheet.getRange('B10').setValue(totalPartSpend);   // PartBot Orders Spent
-    budgetSheet.getRange('B11').setValue(totalSpent);        // Total Spent
-    budgetSheet.getRange('B12').setValue(remaining);         // Remaining
-    budgetSheet.getRange('B13').setValue(percentUsed / 100); // % Used
+    budgetSheet.getRange('B10').setValue(partsSpend);
+    budgetSheet.getRange('B11').setValue(totalSpent);
+    budgetSheet.getRange('B12').setValue(remaining);
+    budgetSheet.getRange('B13').setValue(percentUsed / 100);
   } catch (e) {
-    Logger.log('[getBudgetStatus_] Could not update Budget sheet: ' + e);
+    Logger.log('[getBudgetStatus_] Budget sheet update failed: ' + e);
   }
 
   return {
@@ -1491,11 +1514,45 @@ function getBudgetStatus_() {
     event2Budget:   config.event2Budget,
     nonPartsCost:   config.nonPartsCost,
     partsAvailable: config.partsAvailable,
-    partBotSpend:   totalPartSpend,
+    partBotSpend:   partsSpend,
     totalSpent:     totalSpent,
     remaining:      remaining,
     percentUsed:    percentUsed.toFixed(1)
   };
+}
+
+// Helper — sum submitted/approved requests within season dates
+function getPendingRequestsSpend_(seasonStart, seasonEnd) {
+  const ss    = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  if (!sheet) return 0;
+
+  const skipStatuses = [
+    STATUS.CANCELLED, STATUS.DENIED,
+  ];
+
+  let pendingSpend = 0;
+  const data = sheet.getDataRange().getValues();
+
+  for (let i = 1; i < data.length; i++) {
+    const id      = (data[i][PART_REQUESTS_COLS.REQUEST_ID - 1]     || '').toString();
+    const status  = (data[i][PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString();
+    const ts      = data[i][PART_REQUESTS_COLS.TIMESTAMP - 1];
+    const estCost = parseFloat(data[i][PART_REQUESTS_COLS.TOTAL_EST_COST - 1]) || 0;
+
+    if (!id) continue;
+    if (skipStatuses.some(s => status === s)) continue;
+    if (estCost <= 0) continue;
+
+    if (ts) {
+      const reqDate = new Date(ts);
+      if (reqDate < seasonStart || reqDate > seasonEnd) continue;
+    }
+
+    pendingSpend += estCost;
+  }
+
+  return pendingSpend;
 }
 
 function handleBudgetStatus_(body) {
@@ -1544,6 +1601,33 @@ function showBudgetStatus() {
  * BUDGET STATUS PER REQUEST (Column P)
  ******************************************************/
 
+function enrichAllPending() {
+  const ss    = SpreadsheetApp.getActive();
+  const sheet = ss.getSheetByName('Part Requests');
+  const data  = sheet.getDataRange().getValues();
+  
+  for (let i = 1; i < data.length; i++) {
+    const id      = (data[i][0] || '').toString();
+    const link    = (data[i][6] || '').toString();
+    const estCost = parseFloat(data[i][13]) || 0;
+    const status  = (data[i][16] || '').toString();
+    
+    // Skip if no link, already has price, or terminal status
+    if (!link) continue;
+    if (estCost > 0) continue;
+    if (status.includes('✔️') || status.includes('❌') || status.includes('🚫')) continue;
+    
+    Logger.log(`Enriching row ${i+1}: ${id}`);
+    try {
+      enrichPartRequest(id, i + 1);
+      Utilities.sleep(2000); // Avoid rate limiting
+    } catch(e) {
+      Logger.log(`Error on ${id}: ` + e);
+    }
+  }
+  Logger.log('Done enriching all pending requests');
+}
+
 function updateBudgetStatus_(sheet, row) {
   // Single-row update — just triggers a full refresh
   // so all rows stay consistent with each other
@@ -1559,7 +1643,7 @@ function refreshAllBudgetStatuses_(sheet) {
     // Get base budget
     const config       = getBudgetConfig_();
     const partBotSpend = calculatePartBotSpend_(config.seasonStart, config.seasonEnd);
-    const baseRemaining = config.totalAllocated - config.openingBalance - partBotSpend;
+    const baseRemaining = config.totalAllocated - config.nonPartsCost - partBotSpend;
 
     Logger.log(`[refreshAllBudgetStatuses_] Base remaining: ${baseRemaining}`);
 
