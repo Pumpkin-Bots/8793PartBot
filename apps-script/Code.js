@@ -1552,9 +1552,10 @@ function getOrCreateBudgetTab_() {
   const fresh = !tab;
   if (!tab) tab = ss.insertSheet(SHEET_NAMES.BUDGET);
 
-  // First sync replaces the old single-season layout
+  // First sync replaces the old single-season layout (A1:F16 only;
+  // rows below, e.g. "Budget Links", belong to mentors and are kept)
   if (fresh || tab.getRange('A1').getValue() !== 'Budget Year') {
-    tab.clear();
+    tab.getRange('A1:F16').clear();
     tab.getRange('A1:A5').setFontWeight('bold');
     tab.getRange(BUDGET_TAB.FIRST_LINE_ROW + BUDGET_LINES.length + 2, 1)
       .setValue('This tab is written by PartBot. Change budget amounts in the HMB Robotics budget spreadsheet, then run 🎃 PartBot → 🔄 Sync Budget.')
