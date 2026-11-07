@@ -967,6 +967,9 @@ function handleCancelRequest_(body) {
       .setValue(currentNotes + `\n[${timestamp}] 🚫 Cancelled by ${canceller}: ${reason}`);
     sheet.getRange(foundRow, 1, 1, sheet.getLastColumn()).setBackground('#e0e0e0');
 
+    // Cancelled requests no longer consume budget
+    refreshAllBudgetStatuses_(sheet);
+
     return jsonResponse_({ status: 'ok', message: 'Request cancelled successfully', requestId: requestId });
 
   } catch (err) {
@@ -1121,6 +1124,9 @@ function onEdit(e) {
       case STATUS.COMPLETE:  handleComplete(sheet, row);  break;
       case STATUS.DENIED:    handleDenied(sheet, row);    break;
     }
+
+    // Status changes can add or remove a request from the budget
+    refreshAllBudgetStatuses_(sheet);
   } catch (err) {
     Logger.log(`[onEdit] Error: ${err}`);
     SpreadsheetApp.getUi().alert('Error', 'Failed to process status change:\n\n' + err.toString(), SpreadsheetApp.getUi().ButtonSet.OK);
@@ -1640,10 +1646,9 @@ function refreshAllBudgetStatuses_(sheet) {
     if (!sheet) sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
     if (!sheet) return;
 
-    // Get base budget
-    const config       = getBudgetConfig_();
-    const partBotSpend = calculatePartBotSpend_(config.seasonStart, config.seasonEnd);
-    const baseRemaining = config.totalAllocated - config.nonPartsCost - partBotSpend;
+    // Get base budget — requests below are the parts spend (same rule as getBudgetStatus_)
+    const config        = getBudgetConfig_();
+    const baseRemaining = config.totalAllocated - config.nonPartsCost;
 
     Logger.log(`[refreshAllBudgetStatuses_] Base remaining: ${baseRemaining}`);
 
@@ -1667,6 +1672,12 @@ function refreshAllBudgetStatuses_(sheet) {
 
       if (!id) continue;
       if (skipStatuses.some(s => status === s)) continue;
+
+      // Only count requests within season window
+      if (timestamp) {
+        const reqDate = new Date(timestamp);
+        if (reqDate < config.seasonStart || reqDate > config.seasonEnd) continue;
+      }
 
       activeRows.push({
         rowIndex:  i + 1,    // 1-based sheet row
@@ -1718,6 +1729,9 @@ function refreshAllBudgetStatuses_(sheet) {
 
       Logger.log(`[refreshAllBudgetStatuses_] ${req.id}: -${fmt(costHere)} → ${statusText}`);
     }
+
+    // Keep Budget tab totals in sync with Column P
+    getBudgetStatus_();
 
   } catch (err) {
     Logger.log('[refreshAllBudgetStatuses_] Error: ' + err);
