@@ -1439,63 +1439,6 @@ function getBudgetConfig_() {
   };
 }
 
-// All orders ever placed through PartBot (no date filter)
-function calculateAllTimeSpend_() {
-  const ss          = SpreadsheetApp.getActive();
-  const ordersSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
-  if (!ordersSheet) return 0;
-
-  const data     = ordersSheet.getDataRange().getValues();
-  let totalSpend = 0;
-
-  for (let i = 1; i < data.length; i++) {
-    const row         = data[i];
-    const orderStatus = (row[ORDERS_COLS.ORDER_STATUS - 1] || '').toString();
-    const finalPrice  = parseFloat(row[ORDERS_COLS.FINAL_UNIT_PRICE - 1]) || 0;
-    const totalCost   = parseFloat(row[ORDERS_COLS.TOTAL_COST - 1])       || 0;
-    const qtyOrdered  = parseFloat(row[ORDERS_COLS.QTY_ORDERED - 1])      || 0;
-
-    const isCountable = ['Ordered', 'Received', 'Complete', 'Approved']
-      .some(s => orderStatus.toLowerCase().includes(s.toLowerCase()));
-
-    if (!isCountable) continue;
-    totalSpend += totalCost > 0 ? totalCost : (finalPrice * qtyOrdered);
-  }
-
-  return totalSpend;
-}
-
-// Only offseason orders (4/15/2026+)
-function calculateOffseasonSpend_(seasonStart, seasonEnd) {
-  const ss          = SpreadsheetApp.getActive();
-  const ordersSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
-  if (!ordersSheet) return 0;
-
-  const data     = ordersSheet.getDataRange().getValues();
-  let totalSpend = 0;
-
-  for (let i = 1; i < data.length; i++) {
-    const row         = data[i];
-    const orderStatus = (row[ORDERS_COLS.ORDER_STATUS - 1] || '').toString();
-    const orderDate   = new Date(row[ORDERS_COLS.ORDER_DATE - 1]);
-    const finalPrice  = parseFloat(row[ORDERS_COLS.FINAL_UNIT_PRICE - 1]) || 0;
-    const totalCost   = parseFloat(row[ORDERS_COLS.TOTAL_COST - 1])       || 0;
-    const qtyOrdered  = parseFloat(row[ORDERS_COLS.QTY_ORDERED - 1])      || 0;
-
-    const isCountable = [STATUS.ORDERED, STATUS.RECEIVED, STATUS.COMPLETE]
-      .some(s => orderStatus === s || orderStatus.includes(
-        s.replace(/[^\w\s]/g, '').trim()));
-
-    if (!isCountable) continue;
-    if (!orderDate || isNaN(orderDate.getTime())) continue;
-    if (orderDate < seasonStart || orderDate > seasonEnd) continue;
-
-    totalSpend += totalCost > 0 ? totalCost : (finalPrice * qtyOrdered);
-  }
-
-  return totalSpend;
-}
-
 function getBudgetStatus_() {
   const config = getBudgetConfig_();
   const ss     = SpreadsheetApp.getActive();
@@ -1555,40 +1498,6 @@ function getBudgetStatus_() {
     remaining:      remaining,
     percentUsed:    percentUsed.toFixed(1)
   };
-}
-
-// Helper — sum submitted/approved requests within season dates
-function getPendingRequestsSpend_(seasonStart, seasonEnd) {
-  const ss    = SpreadsheetApp.getActive();
-  const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
-  if (!sheet) return 0;
-
-  const skipStatuses = [
-    STATUS.CANCELLED, STATUS.DENIED,
-  ];
-
-  let pendingSpend = 0;
-  const data = sheet.getDataRange().getValues();
-
-  for (let i = 1; i < data.length; i++) {
-    const id      = (data[i][PART_REQUESTS_COLS.REQUEST_ID - 1]     || '').toString();
-    const status  = (data[i][PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString();
-    const ts      = data[i][PART_REQUESTS_COLS.TIMESTAMP - 1];
-    const estCost = parseFloat(data[i][PART_REQUESTS_COLS.TOTAL_EST_COST - 1]) || 0;
-
-    if (!id) continue;
-    if (skipStatuses.some(s => status === s)) continue;
-    if (estCost <= 0) continue;
-
-    if (ts) {
-      const reqDate = new Date(ts);
-      if (reqDate < seasonStart || reqDate > seasonEnd) continue;
-    }
-
-    pendingSpend += estCost;
-  }
-
-  return pendingSpend;
 }
 
 function handleBudgetStatus_(body) {
