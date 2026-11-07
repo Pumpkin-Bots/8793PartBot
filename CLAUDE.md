@@ -137,18 +137,6 @@ This is a read-only formula, not a checkbox. Checkboxes looked like a workflow s
 
 The `🎃 PartBot` sheet menu includes `📦 Retry Add to Inventory` and `🔍 Find Missing Inventory Items`.
 
-## Local Reimbursement Report
-
-Reimbursement generation is a local Mac CLI in `reimbursement-local/`; do not add it to the PartBot sheet menu or Apps Script web app. It uses only invoice PDFs in a folder: no Sheets, Gmail, or OAuth.
-
-- Run `cd reimbursement-local && npm install` then `npm test`.
-- Run `npm run report -- --receipt-dir <folder>`. `src/invoice.js` extracts each PDF's text (pdfjs-dist), suggests a description and amount (grand/order/total-due labels, then largest dollar amount flagged low-confidence), and the user confirms or edits each line. Image-only PDFs need manual entry. Max 6 lines (template limit); skipped PDFs are left out. Existing `FDILL_Receipts_*.pdf` bundles are ignored.
-- Output is a new `Submitted_<YYYY-MM-DD>_<original invoice folder name>[_NN]` folder under the expenses root (override with `--output`), containing the filled `.xlsx` (default template from the prior submission, `--template` to override), a same-name-stem printable PDF preview generated directly from the form values, a receipts-only combined PDF, and numbered individual PDFs. The preview does not require Numbers and does not reproduce the spreadsheet's exact styling. Existing folders are never overwritten. Nothing is emailed or submitted.
-- After actually submitting, run `npm run mark-submitted -- --report <folder>`; those PDFs (by SHA-256) are skipped on later runs unless `--include-submitted`.
-- Form output: clears all six example rows, writes Total Due as a numeric value (not a formula; `=SUM` broke in Google Sheets), and strips Google custom workbook metadata for Numbers compatibility.
-
-See `reimbursement-local/README.md` for command details.
-
 ### 1. OnShape BOM integration (designed)
 
 - **Phase 1 — CSV import:** `🎃 PartBot → 📥 Import BOM from CSV`. Columns: `Part Number, Description, Quantity, Vendor, Link, Notes`. Add subsystem and vendor detection, duplicate detection, and batch creation with one timestamp.

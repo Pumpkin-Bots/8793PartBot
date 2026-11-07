@@ -21,3 +21,7 @@ apps-script/appsscript.json
 # Logs
 logs/
 *.log
+
+# Local-only tools (not part of this repo)
+reimbursement-local/
+reimbursement-service/
