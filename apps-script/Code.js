@@ -81,6 +81,7 @@ const STATUS = {
   UNDER_REVIEW: '👀 Under Review',
   APPROVED: '✅ Approved',
   ORDERED: '🛒 Ordered',
+  DELIVERED_OFFSITE: '🏠 At Mentor (not in shop)',  // delivered to a mentor's home, not yet brought to the shop
   RECEIVED: '📦 Received',
   COMPLETE: '✔️ Complete',
   DENIED: '❌ Denied',
@@ -150,6 +151,10 @@ function doPost(e) {
 
     if (action === 'receive') {
       return handleReceive_(body);
+    }
+
+    if (action === 'delivered') {
+      return handleDelivered_(body);
     }
 
     if (action === 'budgetStatus') {
@@ -813,7 +818,8 @@ function findOnOrder_(skuQuery, terms) {
     return terms.length && terms.every(t => hay.indexOf(t) !== -1);
   }).slice(0, 5).map(r => ({
     requestId: r[C.REQUEST_ID - 1], partName: r[C.PART_NAME - 1] || r[C.SKU - 1] || '',
-    qty: r[C.QUANTITY - 1], status: r[C.REQUEST_STATUS - 1], requester: r[C.REQUESTER - 1]
+    qty: r[C.QUANTITY - 1], status: r[C.REQUEST_STATUS - 1], requester: r[C.REQUESTER - 1],
+    holder: r[C.REQUEST_STATUS - 1] === STATUS.DELIVERED_OFFSITE ? offsiteHolder_(r[C.MENTOR_NOTES - 1]) : ''
   }));
 }
 
@@ -856,7 +862,9 @@ function handleOrderStatus_(body) {
             qty:           row[PART_REQUESTS_COLS.QUANTITY - 1],
             priority:      row[PART_REQUESTS_COLS.PRIORITY - 1],
             neededBy:      formatDateForResponse_(row[PART_REQUESTS_COLS.NEEDED_BY - 1]),
-            requestStatus: row[PART_REQUESTS_COLS.REQUEST_STATUS - 1]
+            requestStatus: row[PART_REQUESTS_COLS.REQUEST_STATUS - 1],
+            holder:        row[PART_REQUESTS_COLS.REQUEST_STATUS - 1] === STATUS.DELIVERED_OFFSITE
+                             ? offsiteHolder_(row[PART_REQUESTS_COLS.MENTOR_NOTES - 1]) : ''
           };
           break;
         }
@@ -1073,6 +1081,7 @@ function handleCancelRequest_(body) {
 
     if (currentStatus.includes('Approved') || currentStatus === STATUS.APPROVED ||
         currentStatus.includes('Ordered') || currentStatus.includes('🛒') ||
+        currentStatus === STATUS.DELIVERED_OFFSITE ||
         currentStatus.includes('Received') || currentStatus.includes('📦') ||
         currentStatus.includes('Complete') || currentStatus.includes('✔️')) {
       return jsonResponse_({
@@ -1281,6 +1290,7 @@ function onEdit(e) {
     switch (newStatus) {
       case STATUS.APPROVED:  handleApproved(sheet, row);  break;
       case STATUS.ORDERED:   handleOrdered(sheet, row);   break;
+      case STATUS.DELIVERED_OFFSITE: handleDeliveredOffsite(sheet, row); break;
       case STATUS.RECEIVED:  handleReceived(sheet, row);  break;
       case STATUS.COMPLETE:  handleComplete(sheet, row);  break;
       case STATUS.DENIED:    handleDenied(sheet, row);    break;
@@ -2182,6 +2192,9 @@ function setupConditionalFormatting_(sheet, lastRow) {
       .whenFormulaSatisfied(`=AND($Q2="${STATUS.RECEIVED}", NOT(REGEXMATCH($R2, "added to inventory")))`)
       .setBackground('#fff3cd').setRanges([range]).build(),
     SpreadsheetApp.newConditionalFormatRule()
+      .whenFormulaSatisfied(`=$Q2="${STATUS.DELIVERED_OFFSITE}"`)
+      .setBackground('#cfe2f3').setRanges([range]).build(),
+    SpreadsheetApp.newConditionalFormatRule()
       .whenFormulaSatisfied(`=$Q2="${STATUS.CANCELLED}"`)
       .setBackground('#f3f3f3').setFontColor('#666666').setRanges([range]).build(),
     SpreadsheetApp.newConditionalFormatRule()
@@ -2193,6 +2206,7 @@ function setupConditionalFormatting_(sheet, lastRow) {
 }
 
 function onOpen() {
+  try { ensureStatusOptions_(); } catch (err) { Logger.log('[onOpen] ensureStatusOptions_: ' + err); }
   SpreadsheetApp.getUi().createMenu('🎃 PartBot')
     .addItem('⚙️ Setup Dropdown Workflow',       'setupDropdownWorkflow')
     .addSeparator()
@@ -2217,12 +2231,14 @@ function showWorkflowGuide() {
     '📥 SUBMITTED → New request\n' +
     '✅ APPROVED → Auto-creates order\n' +
     '🛒 ORDERED → Prompts for tracking\n' +
+    '🏠 AT MENTOR → Delivered to a mentor\'s home, not in the shop yet\n' +
     '📦 RECEIVED → Adds to inventory\n' +
     '✔️ COMPLETE → Marks as done\n' +
     '❌ DENIED → Prompts for reason\n' +
     '🚫 CANCELLED → Student cancelled\n\n' +
     '🟢 Green row = In inventory\n' +
     '🟡 Yellow row = Missing from inventory\n' +
+    '🔵 Blue row = At a mentor\'s home\n' +
     '🔴 Red row = Denied\n' +
     '⚪ Gray row = Cancelled',
     SpreadsheetApp.getUi().ButtonSet.OK
@@ -2239,7 +2255,7 @@ const STUDENT_LOCATION_PREFIX = 'STUDENT-';
 
 // Requests a box can arrive for
 function isReceivable_(status) {
-  return status === STATUS.APPROVED || status === STATUS.ORDERED;
+  return status === STATUS.APPROVED || status === STATUS.ORDERED || status === STATUS.DELIVERED_OFFSITE;
 }
 
 // Locations tab: the list /receive offers. Seeded once from locations already used in Inventory.
@@ -2331,7 +2347,8 @@ function handleReceiveOptions_(body) {
       sku: (r[C.SKU - 1] || '').toString(),
       qty: r[C.QUANTITY - 1] || 1,
       requester: (r[C.REQUESTER - 1] || '').toString(),
-      status: status
+      status: status,
+      holder: status === STATUS.DELIVERED_OFFSITE ? offsiteHolder_(r[C.MENTOR_NOTES - 1]) : ''
     });
   }
   return jsonResponse_({ status: 'ok', requests: requests, locations: getLocations_() });
@@ -2646,4 +2663,110 @@ function findMissingInventoryItems() {
     message += `\n\nUse "📦 Retry Add to Inventory" on each row to fix.`;
     ui.alert('⚠️ Missing Inventory Items', message, ui.ButtonSet.OK);
   }
+}
+/******************************************************
+ * DELIVERED TO A MENTOR'S HOME (/delivered)
+ * Orders often ship to a mentor's house. This status tells students the
+ * box has arrived but isn't in the shop yet; /receive finishes the job.
+ ******************************************************/
+
+const OFFSITE_NOTE_RE = /🏠 Delivered to (.+?) \(not in shop yet\)/g;
+
+// Who has it, from the latest "🏠 Delivered to X (not in shop yet)" note
+function offsiteHolder_(notes) {
+  const all = Array.from((notes || '').toString().matchAll(OFFSITE_NOTE_RE));
+  return all.length ? all[all.length - 1][1] : '';
+}
+
+// Shared by the sheet dropdown and Discord. Call inside withScriptLock_ when not from onEdit.
+function markDeliveredOffsite_(sheet, row, holder, loggedBy) {
+  const C = PART_REQUESTS_COLS;
+  const who = (holder || '').toString().trim() || 'a mentor';
+  const requestId = sheet.getRange(row, C.REQUEST_ID).getValue().toString();
+  const notes = (sheet.getRange(row, C.MENTOR_NOTES).getValue() || '').toString();
+
+  if (sheet.getRange(row, C.REQUEST_STATUS).getValue() !== STATUS.DELIVERED_OFFSITE) {
+    sheet.getRange(row, C.REQUEST_STATUS).setValue(STATUS.DELIVERED_OFFSITE);
+  }
+  sheet.getRange(row, C.MENTOR_NOTES).setValue((notes ? notes + '\n' : '') +
+    `[${new Date().toLocaleDateString()}] 🏠 Delivered to ${who} (not in shop yet)` +
+    (loggedBy && loggedBy !== who ? `, logged by ${loggedBy}` : ''));
+
+  // Received Date stays blank until it reaches the shop, so /openorders keeps listing it
+  const ordersSheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAMES.ORDERS);
+  const orderRow = ordersSheet ? findOrderByRequestId(ordersSheet, requestId) : null;
+  if (orderRow) {
+    ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_STATUS).setValue(`🏠 At ${who}'s, not in shop yet`);
+    if (!ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_DATE).getValue()) {
+      ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_DATE).setValue(new Date());
+    }
+  }
+  return who;
+}
+
+// Sheet dropdown set to 🏠 At Mentor
+function handleDeliveredOffsite(sheet, row) {
+  const ui = SpreadsheetApp.getUi();
+  const res = ui.prompt('🏠 Delivered to a mentor',
+    'Who has the package? (e.g. franz_ee). Students will see this until it is received in the shop.',
+    ui.ButtonSet.OK_CANCEL);
+  const holder = res.getSelectedButton() === ui.Button.OK ? res.getResponseText() : '';
+  const who = markDeliveredOffsite_(sheet, row, holder, '');
+  SpreadsheetApp.getActive().toast(`Students will see it's at ${who}'s. Use /receive when it reaches the shop.`, '🏠 Delivered', 5);
+}
+
+// Action delivered: { requestId, holder, by }
+function handleDelivered_(body) {
+  const requestId = (body.requestId || '').toString().trim().toUpperCase();
+  const holder    = (body.holder || body.by || '').toString().trim();
+  const by        = (body.by || '').toString().trim();
+  if (!requestId) return jsonResponse_({ status: 'error', message: 'Request ID is required' });
+
+  try {
+    ensureStatusOptions_();
+    const result = withScriptLock_(() => {
+      const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAMES.PART_REQUESTS);
+      const C = PART_REQUESTS_COLS;
+      const ids = sheet.getRange(2, C.REQUEST_ID, Math.max(sheet.getLastRow() - 1, 1), 1).getValues();
+      const idx = ids.findIndex(r => (r[0] || '').toString().trim().toUpperCase() === requestId);
+      if (idx < 0) return { error: `Request ${requestId} not found.` };
+      const row = idx + 2;
+      const r = sheet.getRange(row, 1, 1, C.MENTOR_NOTES).getValues()[0];
+      const status = (r[C.REQUEST_STATUS - 1] || '').toString();
+      if (!isReceivable_(status)) {
+        return { error: `${r[C.REQUEST_ID - 1]} is ${status || 'blank'}. Only Approved or Ordered requests can be marked delivered.` };
+      }
+      const who = markDeliveredOffsite_(sheet, row, holder, by);
+      SpreadsheetApp.flush();
+      return {
+        requestId: r[C.REQUEST_ID - 1].toString(),
+        partName: (r[C.PART_NAME - 1] || '').toString(),
+        sku: (r[C.SKU - 1] || '').toString(),
+        qty: r[C.QUANTITY - 1] || 1,
+        requester: (r[C.REQUESTER - 1] || '').toString(),
+        holder: who
+      };
+    });
+    if (result.error) return jsonResponse_({ status: 'error', message: result.error });
+    return jsonResponse_(Object.assign({ status: 'ok' }, result));
+  } catch (err) {
+    Logger.log('[handleDelivered_] Error: ' + err);
+    return jsonResponse_({ status: 'error', message: err.toString() });
+  }
+}
+
+// Adds any new STATUS values (like 🏠 At Mentor) to the status dropdown without re-running full setup
+function ensureStatusOptions_() {
+  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  if (!sheet || sheet.getMaxRows() < 2) return;
+  const rule = sheet.getRange(2, PART_REQUESTS_COLS.REQUEST_STATUS).getDataValidation();
+  const current = rule && rule.getCriteriaValues ? (rule.getCriteriaValues()[0] || []) : [];
+  const wanted = Object.values(STATUS);
+  if (wanted.every(v => current.indexOf(v) !== -1)) return;
+
+  const lastRow = sheet.getMaxRows();
+  sheet.getRange(2, PART_REQUESTS_COLS.REQUEST_STATUS, lastRow - 1, 1).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(wanted, true).setAllowInvalid(false).build());
+  setupConditionalFormatting_(sheet, lastRow);
+  Logger.log('[ensureStatusOptions_] Status dropdown updated');
 }

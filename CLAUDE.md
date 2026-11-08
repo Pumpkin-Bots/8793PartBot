@@ -93,10 +93,11 @@ The verified `bot.js` registers these guild-scoped commands through `Routes.appl
 - `/cancelrequest`: request ID and optional reason
 - `/inventory`: exact SKU, or keyword search where every word must match SKU/name/vendor/location; in-stock first, up to 15, plus matching Approved/Ordered requests (`onOrder`)
 - `/receive`: request (autocomplete), location (autocomplete from the Locations tab) **or** student (user picker), optional qty. Posts a public "It's here!" message pinging the requester (`guild.members.search` by username). Optional `RECEIVING_ROLE_ID` in `.env` limits it to a role. Autocomplete reads a cache refreshed every 2 minutes via `receiveOptions`, because Apps Script is too slow for Discord's 3-second autocomplete limit. Requested by Franz as a student user story (2026-11-08).
-- `/orderstatus`: request ID or order ID
+- `/delivered`: request (same autocomplete, minus ones already delivered) and optional mentor (default: the caller). Marks the request 🏠 At Mentor (not in shop) for packages delivered to a mentor's home, posts a public message pinging the requester. Optional `MENTOR_ROLE_ID` limits it. Requested by Franz as a student user story (2026-11-08).
+- `/orderstatus`: request ID or order ID (shows who has it when 🏠 At Mentor)
 - `/openorders`: pending orders and denied requests
 
-Apps Script `doPost` actions include `health`, `discordRequest`, `inventory`, `orderStatus`, `openOrders`, `cancelRequest`, `budgetStatus`, `receiveOptions`, and `receive`. `shared-constants.js` contains action/field constants and validation helpers, but no corresponding `SharedConstants.gs` was present in the Apps Script directory at verification. Keep the actual bot and Apps Script contract synchronized when adding or changing actions.
+Apps Script `doPost` actions include `health`, `discordRequest`, `inventory`, `orderStatus`, `openOrders`, `cancelRequest`, `budgetStatus`, `receiveOptions`, `receive`, and `delivered`. `shared-constants.js` contains action/field constants and validation helpers, but no corresponding `SharedConstants.gs` was present in the Apps Script directory at verification. Keep the actual bot and Apps Script contract synchronized when adding or changing actions.
 
 ## Data Model
 
@@ -120,13 +121,16 @@ Driven by `onEdit` in the Part Requests status column:
 
 ```text
 Submitted -> Under Review -> Approved (creates Orders row)
-          -> Ordered -> Received (adds to Inventory; prompts for location)
+          -> Ordered -> 🏠 At Mentor (not in shop; prompts for who has it)
+                     -> Received (adds to Inventory; prompts for location)
                      -> Complete
           -> Denied (prompts for reason)
           -> Cancelled (student-initiated)
 ```
 
-Denied rows are highlighted red; cancelled rows gray. Received rows are green when added to inventory and yellow when missing from inventory.
+🏠 At Mentor means delivered to a mentor's home: the holder lives only in Mentor Notes as `🏠 Delivered to <name> (not in shop yet)` (parsed by `offsiteHolder_`; keep the phrase stable), the order's status reads `🏠 At <name>'s, not in shop yet` and its Received Date stays blank so `/openorders` still lists it. It counts as receivable (`isReceivable_`) and can't be cancelled. `ensureStatusOptions_()` (run from `onOpen` and the `delivered` action) adds new STATUS values to the dropdown without a full setup.
+
+Denied rows are highlighted red; cancelled rows gray; 🏠 At Mentor rows blue. Received rows are green when added to inventory and yellow when missing from inventory.
 
 ## Budget
 

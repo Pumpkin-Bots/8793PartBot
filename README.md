@@ -80,6 +80,7 @@ Students request parts using intuitive slash commands:
 - `/cancelrequest` - Cancel your own request
 - `/inventory` - Search what we have and where it is (check before requesting!)
 - `/receive` - A part arrived: record it and where you put it (receiving team)
+- `/delivered` - Mentors: an order arrived at your home, not in the shop yet
 - `/openorders` - View all pending orders and denied requests
 - `/orderstatus` - Check status of a specific request or order
 
@@ -146,6 +147,23 @@ Students can cancel their own requests:
 - Optional: set `RECEIVING_ROLE_ID` in the bot's `.env` to limit `/receive` to a Discord role (server managers can always use it).
 - If fewer arrived than ordered, the request is still marked Received and the reply says so; a mentor follows up on the rest.
 
+### 🏠 Delivered to a Mentor's Home (`/delivered`)
+
+> *"I am a student and would like to know when an order is received by a mentor (ships to home address) but has not been brought into the PumpkinBots shop to be moved into inventory."*
+
+Many orders ship to a mentor's house. When the box arrives there, the mentor runs:
+
+```
+/delivered request:<start typing the part name or REQ ID>             # you have it
+/delivered request:REQ-a35de4bb mentor:@other_mentor                  # someone else has it
+```
+
+- PartBot posts **🏠 Arrived at a mentor's home!** and pings the student who requested it.
+- The request becomes **🏠 At Mentor (not in shop)** (blue row). Students see who has it in `/openorders` (listed first), `/orderstatus`, and the "Already on order" part of `/inventory`.
+- It is **not** in inventory yet. When it's brought to the shop, a student uses `/receive` as usual, which adds it to inventory and records the shop location. In `/receive` suggestions it shows as `🏠 <mentor> · <part>`.
+- Mentors can also pick 🏠 At Mentor in the sheet's status dropdown; it asks who has the package.
+- Optional: set `MENTOR_ROLE_ID` in the bot's `.env` to limit `/delivered` to a Discord role (server managers can always use it).
+
 ### 📚 Inventory Lookup
 ```
 /inventory search:hex bearing
@@ -173,6 +191,7 @@ Anyone can search. Every word must match somewhere in the SKU, part name, vendor
 - **👀 Under Review** → Pending mentor review
 - **✅ Approved** → Auto-creates order in Orders sheet
 - **🛒 Ordered** → Tracking and ETA management
+- **🏠 At Mentor (not in shop)** → Delivered to a mentor's home; `/receive` when it reaches the shop
 - **📦 Received** → Auto-adds to inventory with location prompt
 - **✔️ Complete** → Marks request as done, grays out row
 - **❌ Denied** → Prompts for reason, highlights row red
@@ -337,6 +356,12 @@ Posted to the channel. Starts with the FRC total (budget, total spent = logged b
 /receive request:REQ-xxxx student:@name [qty:N]
 ```
 See [Receiving Parts](#-receiving-parts-receive).
+
+### `/delivered` - Arrived at a Mentor's Home
+```
+/delivered request:REQ-xxxx [mentor:@name]
+```
+See [Delivered to a Mentor's Home](#-delivered-to-a-mentors-home-delivered).
 
 ### `/openorders` - View Pending Orders
 ```
@@ -548,7 +573,7 @@ We welcome contributions from other FRC teams! To contribute:
 git clone https://github.com/YOUR_USERNAME/8793PartBot.git
 cd 8793PartBot/discord-bot
 npm ci
-# Create .env with: DISCORD_TOKEN, CLIENT_ID, GUILD_ID, APPS_SCRIPT_URL, PARTBOT_SECRET (optional: RECEIVING_ROLE_ID)
+# Create .env with: DISCORD_TOKEN, CLIENT_ID, GUILD_ID, APPS_SCRIPT_URL, PARTBOT_SECRET (optional: RECEIVING_ROLE_ID, MENTOR_ROLE_ID)
 node bot.js
 ```
 

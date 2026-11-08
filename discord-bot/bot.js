@@ -46,6 +46,9 @@ const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
 const PARTBOT_SECRET = process.env.PARTBOT_SECRET || '';
 // Optional: only members with this Discord role (or server managers) can use /receive
 const RECEIVING_ROLE_ID = process.env.RECEIVING_ROLE_ID || '';
+// Optional: only members with this Discord role (or server managers) can use /delivered
+const MENTOR_ROLE_ID = process.env.MENTOR_ROLE_ID || '';
+const OFFSITE_STATUS = '🏠 At Mentor (not in shop)';
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !APPS_SCRIPT_URL) {
   console.error('❌ Missing environment variables');
@@ -212,6 +215,17 @@ const commands = [
     )
     .addIntegerOption(option =>
       option.setName('qty').setDescription('How many arrived (default: the quantity requested)').setRequired(false).setMinValue(1)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('delivered')
+    .setDescription('Mentors: an order arrived at your home, not in the shop yet')
+    .addStringOption(option =>
+      option.setName('request').setDescription('Which request arrived (type a part name or REQ ID)')
+        .setRequired(true).setAutocomplete(true)
+    )
+    .addUserOption(option =>
+      option.setName('mentor').setDescription('Who has it (default: you)').setRequired(false)
     )
 ].map(cmd => cmd.toJSON());
 
@@ -238,7 +252,7 @@ client.once('ready', () => {
 
 client.on('interactionCreate', async interaction => {
   if (interaction.isAutocomplete()) {
-    if (interaction.commandName === 'receive') await handleReceiveAutocomplete(interaction).catch(err =>
+    if (interaction.commandName === 'receive' || interaction.commandName === 'delivered') await handleReceiveAutocomplete(interaction).catch(err =>
       console.error('[Bot] Autocomplete error:', err.message));
     return;
   }
@@ -266,6 +280,9 @@ client.on('interactionCreate', async interaction => {
         break;
       case 'receive':
         await handleReceive(interaction);
+        break;
+      case 'delivered':
+        await handleDelivered(interaction);
         break;
     }
   } catch (err) {
@@ -471,6 +488,14 @@ async function handleOpenOrders(interaction) {
     }
 
     const lines = [];
+    const offsite = orders.filter(o => (o.status || '').startsWith('🏠'));
+    if (offsite.length) {
+      lines.push(`🏠 **Arrived at a mentor's home, not in the shop yet** (${offsite.length})`);
+      for (const o of offsite) {
+        lines.push(`• **${o.orderId}** — ${o.partName || '(no name)'} ×${o.qty || '?'} · ${o.status.replace(/^🏠\s*/, '')}`);
+      }
+      lines.push('');
+    }
     lines.push('📦 **Open Orders (not yet received)**');
 
     if (orders.length === 0) {
@@ -551,7 +576,8 @@ async function handleOrderStatus(interaction) {
 
       const lines = [
         `📄 **Request Status – ${r.id}**\n`,
-        `**Status:** ${r.requestStatus || 'Unknown'}`,
+        `**Status:** ${r.requestStatus || 'Unknown'}` +
+          (r.holder ? `\n🏠 Delivered to **${r.holder}**; it'll be in the shop once it's brought in and \`/receive\`d.` : ''),
         `**Subsystem:** ${r.subsystem || 'N/A'}`,
         `**Part:** ${r.partName || '(no name)'}`,
         `**Qty:** ${r.qty || 'N/A'}`,
@@ -637,7 +663,8 @@ async function handleInventory(interaction) {
     if (onOrder.length) {
       lines.push('', '🛒 **Already on order:**');
       for (const o of onOrder) {
-        lines.push(`• ${o.qty} × ${truncate(o.partName, 60)} — ${o.requestId} (${o.status}, ${o.requester})`);
+        const state = o.holder ? `🏠 at ${o.holder}'s, not in shop yet` : o.status;
+        lines.push(`• ${o.qty} × ${truncate(o.partName, 60)} — ${o.requestId} (${state}, ${o.requester})`);
       }
     }
 
@@ -686,9 +713,10 @@ async function handleReceiveAutocomplete(interaction) {
 
   if (focused.name === 'request') {
     choices = receiveOptions.requests
-      .filter(r => matchesAll(`${r.id} ${r.partName} ${r.sku} ${r.requester}`))
+      .filter(r => interaction.commandName !== 'delivered' || r.status !== OFFSITE_STATUS)
+      .filter(r => matchesAll(`${r.id} ${r.partName} ${r.sku} ${r.requester} ${r.holder || ''}`))
       .map(r => ({
-        name: truncate(`${r.partName || r.sku || '(no name yet)'} ×${r.qty} · ${r.requester} · ${r.id}`, 100),
+        name: truncate(`${r.holder ? `🏠 ${r.holder} · ` : ''}${r.partName || r.sku || '(no name yet)'} ×${r.qty} · ${r.requester} · ${r.id}`, 100),
         value: r.id
       }));
   } else if (focused.name === 'location') {
@@ -700,14 +728,14 @@ async function handleReceiveAutocomplete(interaction) {
   await interaction.respond(choices.slice(0, 25));
 }
 
-function canReceive(interaction) {
-  if (!RECEIVING_ROLE_ID) return true;
+function canReceive(interaction, roleId = RECEIVING_ROLE_ID) {
+  if (!roleId) return true;
   const member = interaction.member;
   if (!member) return false;
   if (member.permissions && member.permissions.has && member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
   const roles = member.roles;
-  if (roles && roles.cache) return roles.cache.has(RECEIVING_ROLE_ID);
-  return Array.isArray(roles) && roles.includes(RECEIVING_ROLE_ID);
+  if (roles && roles.cache) return roles.cache.has(roleId);
+  return Array.isArray(roles) && roles.includes(roleId);
 }
 
 // Requests store the Discord username; look the member up so the requester gets pinged
@@ -779,6 +807,48 @@ async function handleReceive(interaction) {
     console.error('[handleReceive] Error:', err.message);
     await interaction.deleteReply().catch(() => {});
     return interaction.followUp({ content: "⚠️ Couldn't confirm with Google Sheets. Check `/orderstatus` for that request before trying again, so it isn't counted twice.", ephemeral: true });
+  }
+}
+
+/* ---------- /delivered ---------- */
+
+// Orders often ship to a mentor's home; tell the requester it arrived but isn't in the shop yet
+async function handleDelivered(interaction) {
+  if (!canReceive(interaction, MENTOR_ROLE_ID)) {
+    return interaction.reply({ content: '🔒 Only mentors can use /delivered.', ephemeral: true });
+  }
+
+  const requestId = interaction.options.getString('request');
+  const mentor = interaction.options.getUser('mentor') || interaction.user;
+
+  await interaction.deferReply();
+
+  try {
+    const response = await postToAppsScript({
+      action: 'delivered',
+      requestId: requestId,
+      holder: mentor.username,
+      by: interaction.user.username
+    });
+    const data = response.data;
+
+    if (data.status !== 'ok') {
+      await interaction.deleteReply().catch(() => {});
+      return interaction.followUp({ content: `❌ ${data.message || 'Could not record that.'}`, ephemeral: true });
+    }
+
+    refreshReceiveOptions();
+
+    const who = await mentionFor(interaction.guild, data.requester);
+    return interaction.editReply([
+      `🏠 **Arrived at a mentor's home!** ${who}, your **${truncate(data.partName || data.sku, 80)}** ×${data.qty} was delivered to <@${mentor.id}>.`,
+      `It's **not in the shop yet**. It'll go into inventory when it's brought in and \`/receive\`d. · ${data.requestId}`
+    ].join('\n'));
+
+  } catch (err) {
+    console.error('[handleDelivered] Error:', err.message);
+    await interaction.deleteReply().catch(() => {});
+    return interaction.followUp({ content: "⚠️ Couldn't confirm with Google Sheets. Check `/orderstatus` before trying again.", ephemeral: true });
   }
 }
 
