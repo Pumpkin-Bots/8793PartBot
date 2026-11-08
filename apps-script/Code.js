@@ -1182,12 +1182,11 @@ function addToInventoryUnlocked_(sku, partName, quantity, location, vendor) {
     inventorySheet.getRange(existingRow, INVENTORY_COLS.LAST_COUNT_DATE).setValue(new Date());
 
     if (location) {
-      const currentLocation = inventorySheet.getRange(existingRow, INVENTORY_COLS.LOCATION).getValue();
-      if (!currentLocation) {
-        inventorySheet.getRange(existingRow, INVENTORY_COLS.LOCATION).setValue(location);
-      } else if (currentLocation !== location && !currentLocation.includes(location)) {
-        inventorySheet.getRange(existingRow, INVENTORY_COLS.LOCATION).setValue(currentLocation + ', ' + location);
-      }
+      // Same spelling rules as the cleanup menu, so "UKNOWN" and repeats don't creep back in
+      const locationCell    = inventorySheet.getRange(existingRow, INVENTORY_COLS.LOCATION);
+      const currentLocation = (locationCell.getValue() || '').toString();
+      const merged = cleanLocation_(currentLocation ? currentLocation + ', ' + location : location);
+      if (merged !== currentLocation) locationCell.setValue(merged);
     }
   } else {
     const nextRow = inventorySheet.getLastRow() + 1;
@@ -1196,7 +1195,7 @@ function addToInventoryUnlocked_(sku, partName, quantity, location, vendor) {
     rowValues[I.SKU - 1]             = sku || '';
     rowValues[I.VENDOR - 1]          = vendor || '';
     rowValues[I.PART_NAME - 1]       = partName || '';
-    rowValues[I.LOCATION - 1]        = location;
+    rowValues[I.LOCATION - 1]        = cleanLocation_(location);
     rowValues[I.QTY_ON_HAND - 1]     = parseFloat(quantity);
     rowValues[I.LAST_COUNT_DATE - 1] = new Date();
     // Write only the columns we own, so Reorder Threshold / Usage Rate stay blank, not overwritten
@@ -2178,6 +2177,7 @@ function onOpen() {
     .addItem('💲 Fill Missing Prices',             'enrichAllPending')
     .addItem('📦 Retry Add to Inventory',         'retryAddToInventory')
     .addItem('🔍 Find Missing Inventory Items',   'findMissingInventoryItems')
+    .addItem('🧽 Clean Up Locations & Vendors',   'cleanupLocationsAndVendors')
     .addItem('💰 Refresh All Budget Statuses',    'refreshAllBudgetStatuses')
     .addItem('🔄 Sync Budget',                    'syncBudget')
     .addToUi();
@@ -2200,6 +2200,118 @@ function showWorkflowGuide() {
     '⚪ Gray row = Cancelled',
     SpreadsheetApp.getUi().ButtonSet.OK
   );
+}
+
+/******************************************************
+ * LOCATION & VENDOR CLEANUP
+ ******************************************************/
+
+// Location spellings that mean the same place (keys are upper case, single-spaced)
+const LOCATION_ALIASES = {
+  'UKNOWN': 'UNKNOWN',
+  'UNKOWN': 'UNKNOWN',
+  'UNKNOWN': 'UNKNOWN',
+  'UNKNOWN 2024 BOT': 'UNKNOWN-2024-BOT',
+  'UNKNOWN 2026 BOT': 'UNKNOWN-2026-BOT',
+  'PARTS-TOOLBOX': 'TOOLBOX-PARTS'
+};
+
+// Vendor spellings to the names detectVendor() uses (keys are lower case)
+const VENDOR_ALIASES = {
+  'wcp': 'West Coast Products',
+  'westcoast products': 'West Coast Products',
+  'ctr electronics': 'CTRE',
+  'cross the road electronics': 'CTRE',
+  'mcmaster-carr': 'McMaster-Carr',
+  'mcmaster carr': 'McMaster-Carr',
+  'mcmaster': 'McMaster-Carr',
+  'powerworx': 'Powerwerx',
+  'reduxrobotics': 'Redux Robotics',
+  'rev': 'REV Robotics',
+  'andy mark': 'AndyMark',
+  'thriftybot': 'Thrifty Bot'
+};
+
+// "BIN-001, UKNOWN, BIN-001" -> "BIN-001": fix spellings, drop repeats,
+// and drop plain UNKNOWN when a real location is also listed
+function cleanLocation_(text) {
+  const parts = (text || '').toString().split(',')
+    .map(p => p.trim())
+    .filter(Boolean)
+    .map(p => LOCATION_ALIASES[p.toUpperCase().replace(/\s+/g, ' ')] || p);
+  const unique = parts.filter((p, i) => parts.indexOf(p) === i);
+  const known  = unique.filter(p => p !== 'UNKNOWN');
+  return (known.length ? known : unique).join(', ');
+}
+
+// Fix vendor spellings; fill a blank/Unknown/Other vendor only when the SKU prefix is unambiguous
+function canonicalVendor_(vendor, sku) {
+  const v = (vendor || '').toString().trim();
+  const alias = VENDOR_ALIASES[v.toLowerCase()];
+  if (alias) return alias;
+  if (!v || v === 'Unknown' || v === 'Other') {
+    const s = (sku || '').toString().trim();
+    if (/^WCP-\d/i.test(s)) return 'West Coast Products';
+    if (/^REV-\d/i.test(s)) return 'REV Robotics';
+    if (/^am-\d/i.test(s))  return 'AndyMark';
+  }
+  return v;
+}
+
+// Menu: preview, confirm, apply, and log every change to the Cleanup Log tab
+function cleanupLocationsAndVendors() {
+  const ss = SpreadsheetApp.getActive();
+  const ui = SpreadsheetApp.getUi();
+  const inventory = ss.getSheetByName(SHEET_NAMES.INVENTORY);
+  const orders    = ss.getSheetByName(SHEET_NAMES.ORDERS);
+  const changes   = [];   // [sheet, row, column, old, new]
+
+  const scan = (sheet, col, fn, label) => {
+    if (!sheet || sheet.getLastRow() < 2) return;
+    const data = sheet.getRange(2, 1, sheet.getLastRow() - 1, sheet.getLastColumn()).getValues();
+    data.forEach((r, i) => {
+      const before = (r[col - 1] || '').toString();
+      const after  = fn(r);
+      if (after !== before) changes.push([sheet.getName(), i + 2, label, before, after, col]);
+    });
+  };
+
+  scan(inventory, INVENTORY_COLS.LOCATION, r => cleanLocation_(r[INVENTORY_COLS.LOCATION - 1]), 'Location');
+  scan(inventory, INVENTORY_COLS.VENDOR,
+    r => canonicalVendor_(r[INVENTORY_COLS.VENDOR - 1], r[INVENTORY_COLS.SKU - 1]), 'Vendor');
+  scan(orders, ORDERS_COLS.VENDOR,
+    r => canonicalVendor_(r[ORDERS_COLS.VENDOR - 1], r[ORDERS_COLS.SKU - 1]), 'Vendor');
+
+  if (changes.length === 0) {
+    ui.alert('🧽 Clean Up Locations & Vendors', 'Nothing to clean up.', ui.ButtonSet.OK);
+    return;
+  }
+
+  const count = (sheet, label) => changes.filter(c => c[0] === sheet && c[2] === label).length;
+  let preview = `Found ${changes.length} cell(s) to fix:\n` +
+    `• Inventory locations: ${count(SHEET_NAMES.INVENTORY, 'Location')}\n` +
+    `• Inventory vendors: ${count(SHEET_NAMES.INVENTORY, 'Vendor')}\n` +
+    `• Orders vendors: ${count(SHEET_NAMES.ORDERS, 'Vendor')}\n\nExamples:\n`;
+  changes.slice(0, 8).forEach(c => { preview += `${c[0]} row ${c[1]}: "${c[3]}" → "${c[4]}"\n`; });
+  preview += '\nQuantities are not changed. Every change is logged to the "Cleanup Log" tab. Apply?';
+
+  if (ui.alert('🧽 Clean Up Locations & Vendors', preview, ui.ButtonSet.YES_NO) !== ui.Button.YES) return;
+
+  withScriptLock_(() => {
+    changes.forEach(c => ss.getSheetByName(c[0]).getRange(c[1], c[5]).setValue(c[4]));
+    let log = ss.getSheetByName('Cleanup Log');
+    if (!log) {
+      log = ss.insertSheet('Cleanup Log');
+      log.appendRow(['When', 'Sheet', 'Row', 'Column', 'Old Value', 'New Value']);
+      log.setFrozenRows(1);
+    }
+    const now = new Date();
+    log.getRange(log.getLastRow() + 1, 1, changes.length, 6)
+      .setValues(changes.map(c => [now, c[0], c[1], c[2], c[3], c[4]]));
+    SpreadsheetApp.flush();
+  });
+
+  ui.alert('✅ Cleanup Complete', `Fixed ${changes.length} cell(s). See the "Cleanup Log" tab for each change.`, ui.ButtonSet.OK);
 }
 
 /******************************************************

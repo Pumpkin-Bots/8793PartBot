@@ -152,7 +152,11 @@ This is a read-only formula, not a checkbox. Checkboxes looked like a workflow s
 
 `fixInventoryColumnValidation()` was identified as the repair helper after the checkbox-to-formula change: it clears validation on column T, resets it to plain text, and reapplies formulas. Confirm it exists in the current Apps Script source before relying on it; function presence can vary across local and live versions.
 
-The `🎃 PartBot` sheet menu includes `📦 Retry Add to Inventory` and `🔍 Find Missing Inventory Items`.
+The `🎃 PartBot` sheet menu includes `📦 Retry Add to Inventory`, `🔍 Find Missing Inventory Items`, and `🧽 Clean Up Locations & Vendors`.
+
+### Location and vendor spelling
+
+`cleanLocation_()` fixes location spellings (`UKNOWN`/`unknown` → `UNKNOWN`, `unknown 2024 bot` → `UNKNOWN-2024-BOT`, `PARTS-TOOLBOX` → `TOOLBOX-PARTS`), removes repeats, and drops plain `UNKNOWN` when a real location is also listed. `addToInventory` applies it to every receipt. `canonicalVendor_()` maps vendor spellings to `detectVendor()`'s names and fills a blank/Unknown/Other vendor only from an unambiguous `WCP-`, `REV-` or `am-` SKU prefix. The cleanup menu previews, asks, applies both to Inventory and Orders, and logs each old/new value to a `Cleanup Log` tab. Add new spellings to `LOCATION_ALIASES` / `VENDOR_ALIASES`.
 
 ### 1. OnShape BOM integration (designed)
 
