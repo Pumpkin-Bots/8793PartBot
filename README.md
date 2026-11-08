@@ -78,7 +78,8 @@ Students request parts using intuitive slash commands:
 - `/requestpart` - Submit a new part request (now with optional `sku` field!)
 - `/budgetstatus` - FRC budget: total spent and remaining ($ and %), plus every FRC Expenses line
 - `/cancelrequest` - Cancel your own request
-- `/inventory` - Search inventory by SKU or keyword
+- `/inventory` - Search what we have and where it is (check before requesting!)
+- `/receive` - A part arrived: record it and where you put it (receiving team)
 - `/openorders` - View all pending orders and denied requests
 - `/orderstatus` - Check status of a specific request or order
 
@@ -130,22 +131,28 @@ Students can cancel their own requests:
 - ETAs shown in human-readable format (e.g., "Dec 15, 2024")
 - Tracking numbers displayed when available
 
+### 📬 Receiving Parts (`/receive`)
+*User story: "I'm a student on the receiving team. I open a box, get excited, and tell the person who ordered it: It's here! I need a quick way in Discord to record that it arrived and where I put it."*
+
+```
+/receive request:<start typing the part name or REQ ID> location:<bin or toolbox>
+/receive request:REQ-a35de4bb student:@maya          # handed straight to a student
+/receive request:REQ-a35de4bb location:BIN-001 qty:1  # fewer arrived than ordered
+```
+- **request** suggests approved/ordered requests as you type (part name, requester, or ID).
+- **location** suggests entries from the **Locations** tab: subsystem bins, stock bins, toolboxes. Only listed locations are accepted, so typos like "UKNOWN" can't creep in. Pick **student** instead to record that a student has it (`STUDENT-<username>`).
+- The bot posts a public **📦 It's here!** message that pings the requester.
+- Behind the scenes: the request becomes 📦 Received (✅ In Inventory), the order gets its received date, the part is added to Inventory at that location, and the receipt is logged to the **Inventory Moves** tab.
+- Optional: set `RECEIVING_ROLE_ID` in the bot's `.env` to limit `/receive` to a Discord role (server managers can always use it).
+- If fewer arrived than ordered, the request is still marked Received and the reply says so; a mentor follows up on the rest.
+
 ### 📚 Inventory Lookup
 ```
+/inventory search:hex bearing
+/inventory search:BIN-002
 /inventory sku:WCP-0783
-/inventory search:bearing
-/inventory search:BIN-001
 ```
-Returns:
-- Stock on hand (aggregated across multiple locations)
-- Location(s)
-- Vendor
-- Part name
-
-Supports:
-- Exact SKU matching
-- Fuzzy keyword search
-- Location-based lookup (BIN-xxx, RACK-xxx)
+Anyone can search. Every word must match somewhere in the SKU, part name, vendor, or location, so `hex bearing` finds "Flanged Bearing 1/2 Hex". In-stock items are listed first with quantity and location, and matching requests that are **already on order** are shown too. **Search before you request a part.**
 
 ### 🛠 Automated Workflow
 1. Student submits `/requestpart` in Discord (optionally with specific SKU)
@@ -317,17 +324,19 @@ Posted to the channel. Starts with the FRC total (budget, total spent = logged b
 
 ### `/inventory` - Search Inventory
 ```
+/inventory search:hex bearing        # All words must match (name, SKU, vendor, location)
+/inventory search:BIN-001            # Everything in a location
 /inventory sku:WCP-0783              # Exact SKU lookup
-/inventory search:bearing            # Keyword search
-/inventory search:BIN-001            # Location lookup
 ```
 
-**Returns:**
-- Part name
-- SKU
-- Vendor
-- Quantity on-hand
-- Location(s)
+**Returns:** quantity on hand, part name, location(s), SKU (up to 15, in stock first), plus matching requests already on order.
+
+### `/receive` - Record a Delivery
+```
+/receive request:REQ-xxxx location:BIN-001 [qty:N]
+/receive request:REQ-xxxx student:@name [qty:N]
+```
+See [Receiving Parts](#-receiving-parts-receive).
 
 ### `/openorders` - View Pending Orders
 ```
@@ -539,7 +548,7 @@ We welcome contributions from other FRC teams! To contribute:
 git clone https://github.com/YOUR_USERNAME/8793PartBot.git
 cd 8793PartBot/discord-bot
 npm ci
-# Create .env with: DISCORD_TOKEN, CLIENT_ID, GUILD_ID, APPS_SCRIPT_URL, PARTBOT_SECRET
+# Create .env with: DISCORD_TOKEN, CLIENT_ID, GUILD_ID, APPS_SCRIPT_URL, PARTBOT_SECRET (optional: RECEIVING_ROLE_ID)
 node bot.js
 ```
 

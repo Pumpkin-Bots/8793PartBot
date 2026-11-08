@@ -91,11 +91,12 @@ The verified `bot.js` registers these guild-scoped commands through `Routes.appl
 - `/requestpart`: subsystem, category, season (required), optional product link, SKU, quantity, priority, and notes (the max budget option was removed 2026-11-08; column O is no longer filled)
 - `/budgetstatus`: FRC total (budget, spent, remaining $ and %) followed by every FRC Expenses line, posted to the channel, via the `budgetStatus` action. It replaced a separate `/requestbudget` command.
 - `/cancelrequest`: request ID and optional reason
-- `/inventory`: exact SKU or keyword search
+- `/inventory`: exact SKU, or keyword search where every word must match SKU/name/vendor/location; in-stock first, up to 15, plus matching Approved/Ordered requests (`onOrder`)
+- `/receive`: request (autocomplete), location (autocomplete from the Locations tab) **or** student (user picker), optional qty. Posts a public "It's here!" message pinging the requester (`guild.members.search` by username). Optional `RECEIVING_ROLE_ID` in `.env` limits it to a role. Autocomplete reads a cache refreshed every 2 minutes via `receiveOptions`, because Apps Script is too slow for Discord's 3-second autocomplete limit. Requested by Franz as a student user story (2026-11-08).
 - `/orderstatus`: request ID or order ID
 - `/openorders`: pending orders and denied requests
 
-Apps Script `doPost` actions include `health`, `discordRequest`, `inventory`, `orderStatus`, `openOrders`, `cancelRequest`, and `budgetStatus`. `shared-constants.js` contains action/field constants and validation helpers, but no corresponding `SharedConstants.gs` was present in the Apps Script directory at verification. Keep the actual bot and Apps Script contract synchronized when adding or changing actions.
+Apps Script `doPost` actions include `health`, `discordRequest`, `inventory`, `orderStatus`, `openOrders`, `cancelRequest`, `budgetStatus`, `receiveOptions`, and `receive`. `shared-constants.js` contains action/field constants and validation helpers, but no corresponding `SharedConstants.gs` was present in the Apps Script directory at verification. Keep the actual bot and Apps Script contract synchronized when adding or changing actions.
 
 ## Data Model
 
@@ -107,7 +108,11 @@ Apps Script `doPost` actions include `health`, `discordRequest`, `inventory`, `o
 
 **Settings (label in A, value in B):** `Ordering Mode` (In-season / Off-season dropdown), `In-season Order Days`, `Off-season Order Days` (comma-separated weekdays). Read by `getOrderSchedule_()`, which finds rows by label and creates the tab with defaults via `ensureSettingsTab_()` if missing. The `/requestpart` reply shows the current mode's days (`orderSchedule` in the `discordRequest` response, formatted by `formatOrderSchedule` in `bot.js`); the student's season option does not affect it.
 
-IDs use `REQ-xxxxxxxx` and `ORD-xxxxxxxx` formats. Verify column constants against the live sheet before adding or moving columns.
+**Locations (A–C):** Location | Type (Subsystem Bin / Stock Bin / Toolbox / Build / Other) | Description. The list `/receive` offers and accepts; seeded once from Inventory by `ensureLocationsTab_()`. Students are recorded as `STUDENT-<username>` and aren't listed.
+
+**Inventory Moves (A–H):** When | Who | SKU | Part Name | Qty | To | Request ID | How. Appended by `/receive`, the sheet's Received status, and Retry Add to Inventory (`logMove_`, never throws). Groundwork for future `/use` and `/move` commands.
+
+IDs use `REQ-xxxxxxxx` and `ORD-xxxxxxxx` formats; the hex part is lower case, so match on the stored ID, not an upper-cased copy (`findOrderByRequestId` uses a case-sensitive `includes`). Verify column constants against the live sheet before adding or moving columns.
 
 ## Request Status Workflow
 

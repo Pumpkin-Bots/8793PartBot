@@ -31,6 +31,7 @@ require('dotenv').config();
 const {
   Client,
   GatewayIntentBits,
+  PermissionFlagsBits,
   REST,
   Routes,
   SlashCommandBuilder
@@ -43,6 +44,8 @@ const GUILD_ID = process.env.GUILD_ID;
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
 // Shared secret checked by Apps Script doPost; must match the PARTBOT_SECRET Script Property
 const PARTBOT_SECRET = process.env.PARTBOT_SECRET || '';
+// Optional: only members with this Discord role (or server managers) can use /receive
+const RECEIVING_ROLE_ID = process.env.RECEIVING_ROLE_ID || '';
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !APPS_SCRIPT_URL) {
   console.error('❌ Missing environment variables');
@@ -186,12 +189,29 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName('inventory')
-    .setDescription('Look up inventory')
+    .setDescription('Search what we have and where it is (check before requesting a part!)')
     .addStringOption(option =>
-      option.setName('sku').setDescription('Exact SKU / part number').setRequired(false)
+      option.setName('search').setDescription('Words to look for, e.g. "hex bearing" or "BIN-002"').setRequired(false)
     )
     .addStringOption(option =>
-      option.setName('search').setDescription('Keyword search').setRequired(false)
+      option.setName('sku').setDescription('Exact SKU / part number').setRequired(false)
+    ),
+
+  new SlashCommandBuilder()
+    .setName('receive')
+    .setDescription('A part arrived: record it and where you put it')
+    .addStringOption(option =>
+      option.setName('request').setDescription('Which request arrived (type a part name or REQ ID)')
+        .setRequired(true).setAutocomplete(true)
+    )
+    .addStringOption(option =>
+      option.setName('location').setDescription('Bin or toolbox you put it in').setRequired(false).setAutocomplete(true)
+    )
+    .addUserOption(option =>
+      option.setName('student').setDescription('Or: the student you handed it to').setRequired(false)
+    )
+    .addIntegerOption(option =>
+      option.setName('qty').setDescription('How many arrived (default: the quantity requested)').setRequired(false).setMinValue(1)
     )
 ].map(cmd => cmd.toJSON());
 
@@ -212,9 +232,16 @@ const client = new Client({
 
 client.once('ready', () => {
   console.log(`[Bot] ✅ Logged in as ${client.user.tag}`);
+  refreshReceiveOptions();
+  setInterval(refreshReceiveOptions, RECEIVE_OPTIONS_TTL_MS);
 });
 
 client.on('interactionCreate', async interaction => {
+  if (interaction.isAutocomplete()) {
+    if (interaction.commandName === 'receive') await handleReceiveAutocomplete(interaction).catch(err =>
+      console.error('[Bot] Autocomplete error:', err.message));
+    return;
+  }
   if (!interaction.isChatInputCommand()) return;
 
   try {
@@ -236,6 +263,9 @@ client.on('interactionCreate', async interaction => {
         break;
       case 'openorders':
         await handleOpenOrders(interaction);
+        break;
+      case 'receive':
+        await handleReceive(interaction);
         break;
     }
   } catch (err) {
@@ -572,7 +602,7 @@ async function handleInventory(interaction) {
 
   if (!sku && !search) {
     return interaction.reply({
-      content: '⚠️ Provide either **sku** or **search**',
+      content: '⚠️ Type some words in **search** (e.g. `hex bearing`, `BIN-002`) or an exact **sku**',
       ephemeral: true
     });
   }
@@ -580,13 +610,7 @@ async function handleInventory(interaction) {
   await interaction.deferReply({ ephemeral: true });
 
   try {
-    const payload = {
-      action: 'inventory',
-      sku: sku,
-      search: search
-    };
-
-    const response = await postToAppsScript(payload);
+    const response = await postToAppsScript({ action: 'inventory', sku: sku, search: search });
     const data = response.data;
 
     if (data.status !== 'ok') {
@@ -594,34 +618,167 @@ async function handleInventory(interaction) {
     }
 
     const matches = data.matches || [];
+    const onOrder = data.onOrder || [];
+    const total = data.total || matches.length;
+    const lines = [];
 
     if (matches.length === 0) {
-      return interaction.editReply(`🔍 No inventory found for \`${sku || search}\``);
+      lines.push(`🔍 Nothing in inventory matches \`${sku || search}\`.`);
+    } else {
+      lines.push(`📦 **${total} in inventory** matching \`${sku || search}\`${total > matches.length ? ` (showing ${matches.length})` : ''}:`);
+      for (const m of matches) {
+        const qty = m.quantity === '' || m.quantity === null ? '?' : m.quantity;
+        const name = truncate(m.name || '(no name)', 60);
+        lines.push(`• **${qty}** × ${name} — ${m.location || 'no location'}${m.sku ? ` · \`${m.sku}\`` : ''}`);
+      }
+      if (total > matches.length) lines.push('_Add more words to narrow the search._');
     }
 
-    if (matches.length === 1) {
-      const m = matches[0];
-      const lines = [
-        '📦 **Inventory Match**\n',
-        `**SKU:** ${m.sku}`,
-        `**Name:** ${m.name}`,
-        `**Vendor:** ${m.vendor}`,
-        `**Location:** ${m.location}`,
-        `**Qty On-Hand:** ${m.quantity}`
-      ];
-      return interaction.editReply(lines.join('\n'));
+    if (onOrder.length) {
+      lines.push('', '🛒 **Already on order:**');
+      for (const o of onOrder) {
+        lines.push(`• ${o.qty} × ${truncate(o.partName, 60)} — ${o.requestId} (${o.status}, ${o.requester})`);
+      }
     }
 
-    const lines = [`📦 **${matches.length} matches found:**`];
-    for (const m of matches.slice(0, 10)) {
-      lines.push(`• \`${m.sku}\` — ${m.name} (Qty: ${m.quantity}, Loc: ${m.location})`);
-    }
-
-    return interaction.editReply(lines.join('\n'));
+    return interaction.editReply(truncate(lines.join('\n'), 1950));
 
   } catch (err) {
     console.error('[handleInventory] Error:', err.message);
     return interaction.editReply('❌ Failed to contact Google Sheets');
+  }
+}
+
+function truncate(text, max) {
+  const s = (text || '').toString();
+  return s.length > max ? s.slice(0, max - 1) + '…' : s;
+}
+
+/* ---------- /receive ---------- */
+
+// Autocomplete must answer within 3 seconds, faster than Apps Script, so suggestions come from a cache
+const RECEIVE_OPTIONS_TTL_MS = 2 * 60 * 1000;
+let receiveOptions = { requests: [], locations: [], loadedAt: 0 };
+let receiveOptionsLoading = null;
+
+function refreshReceiveOptions() {
+  if (receiveOptionsLoading) return receiveOptionsLoading;
+  receiveOptionsLoading = postToAppsScript({ action: 'receiveOptions' })
+    .then(res => {
+      if (res.data && res.data.status === 'ok') {
+        receiveOptions = { requests: res.data.requests || [], locations: res.data.locations || [], loadedAt: Date.now() };
+      } else {
+        console.error('[receiveOptions] Error:', res.data && res.data.message);
+      }
+    })
+    .catch(err => console.error('[receiveOptions] Failed:', err.message))
+    .finally(() => { receiveOptionsLoading = null; });
+  return receiveOptionsLoading;
+}
+
+async function handleReceiveAutocomplete(interaction) {
+  if (Date.now() - receiveOptions.loadedAt > RECEIVE_OPTIONS_TTL_MS) refreshReceiveOptions();
+
+  const focused = interaction.options.getFocused(true);
+  const words = (focused.value || '').toLowerCase().split(/\s+/).filter(Boolean);
+  const matchesAll = text => words.every(w => text.toLowerCase().includes(w));
+  let choices = [];
+
+  if (focused.name === 'request') {
+    choices = receiveOptions.requests
+      .filter(r => matchesAll(`${r.id} ${r.partName} ${r.sku} ${r.requester}`))
+      .map(r => ({
+        name: truncate(`${r.partName || r.sku || '(no name yet)'} ×${r.qty} · ${r.requester} · ${r.id}`, 100),
+        value: r.id
+      }));
+  } else if (focused.name === 'location') {
+    choices = receiveOptions.locations
+      .filter(l => matchesAll(`${l.name} ${l.type}`))
+      .map(l => ({ name: truncate(`${l.name} (${l.type})`, 100), value: truncate(l.name, 100) }));
+  }
+
+  await interaction.respond(choices.slice(0, 25));
+}
+
+function canReceive(interaction) {
+  if (!RECEIVING_ROLE_ID) return true;
+  const member = interaction.member;
+  if (!member) return false;
+  if (member.permissions && member.permissions.has && member.permissions.has(PermissionFlagsBits.ManageGuild)) return true;
+  const roles = member.roles;
+  if (roles && roles.cache) return roles.cache.has(RECEIVING_ROLE_ID);
+  return Array.isArray(roles) && roles.includes(RECEIVING_ROLE_ID);
+}
+
+// Requests store the Discord username; look the member up so the requester gets pinged
+async function mentionFor(guild, username) {
+  if (!guild || !username) return username ? `**${username}**` : 'the requester';
+  try {
+    const found = await guild.members.search({ query: username, limit: 5 });
+    const member = found.find(m => m.user.username === username);
+    if (member) return `<@${member.id}>`;
+  } catch (err) {
+    console.error('[mentionFor] Member search failed:', err.message);
+  }
+  return `**${username}**`;
+}
+
+async function handleReceive(interaction) {
+  if (!canReceive(interaction)) {
+    return interaction.reply({ content: '🔒 Only the receiving team can use /receive. Ask a mentor if you should have the role.', ephemeral: true });
+  }
+
+  const requestId = interaction.options.getString('request');
+  const location = (interaction.options.getString('location') || '').trim();
+  const student = interaction.options.getUser('student');
+  const qty = interaction.options.getInteger('qty');
+
+  if (!location === !student) {
+    return interaction.reply({
+      content: '⚠️ Say where it went: pick a **location** (bin or toolbox) **or** a **student**, not both.',
+      ephemeral: true
+    });
+  }
+
+  // Public reply: this is the "It's here!" announcement
+  await interaction.deferReply();
+
+  try {
+    const response = await postToAppsScript({
+      action: 'receive',
+      requestId: requestId,
+      location: location,
+      student: student ? student.username : '',
+      quantity: qty || '',
+      receiver: interaction.user.username
+    });
+    const data = response.data;
+
+    if (data.status !== 'ok') {
+      await interaction.deleteReply().catch(() => {});
+      return interaction.followUp({ content: `❌ ${data.message || 'Could not record that.'}`, ephemeral: true });
+    }
+
+    refreshReceiveOptions();
+
+    const who = await mentionFor(interaction.guild, data.requester);
+    const where = student ? `with <@${student.id}>` : `in **${data.location}**`;
+    const short = data.qty < data.orderedQty ? ` (ordered ${data.orderedQty}; mentors will follow up on the rest)` : '';
+    const lines = [
+      `📦 **It's here!** ${who}, your **${truncate(data.partName || data.sku, 80)}** arrived.`,
+      `${data.qty} received by <@${interaction.user.id}>, now ${where}${short}.`
+    ];
+    if (data.onHand !== null && data.onHand !== undefined && data.onHand !== '') {
+      lines.push(`Inventory total for \`${data.sku}\`: **${data.onHand}** · ${data.requestId}`);
+    } else {
+      lines.push(data.requestId);
+    }
+    return interaction.editReply(lines.join('\n'));
+
+  } catch (err) {
+    console.error('[handleReceive] Error:', err.message);
+    await interaction.deleteReply().catch(() => {});
+    return interaction.followUp({ content: "⚠️ Couldn't confirm with Google Sheets. Check `/orderstatus` for that request before trying again, so it isn't counted twice.", ephemeral: true });
   }
 }
 

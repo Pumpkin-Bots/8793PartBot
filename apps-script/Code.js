@@ -15,7 +15,9 @@ const SHEET_NAMES = {
   ORDERS: 'Orders',
   INVENTORY: 'Inventory',
   BUDGET: 'Budget',
-  SETTINGS: 'Settings'
+  SETTINGS: 'Settings',
+  LOCATIONS: 'Locations',
+  MOVES: 'Inventory Moves'
 };
 
 const PART_REQUESTS_COLS = {
@@ -140,6 +142,14 @@ function doPost(e) {
 
     if (action === 'cancelRequest') {
       return handleCancelRequest_(body);
+    }
+
+    if (action === 'receiveOptions') {
+      return handleReceiveOptions_(body);
+    }
+
+    if (action === 'receive') {
+      return handleReceive_(body);
     }
 
     if (action === 'budgetStatus') {
@@ -728,13 +738,15 @@ function handleInventoryLookup_(body) {
     return jsonResponse_({ status: 'error', message: 'Inventory sheet not found' });
   }
 
-  const skuQuery = (body.sku || '').toString().trim();
+  const skuQuery   = (body.sku || '').toString().trim();
   const searchText = (body.search || '').toString().trim();
+  const terms = (searchText || skuQuery).toLowerCase().split(/\s+/).filter(Boolean);
+  const MAX_RESULTS = 15;
 
   try {
     const values = inventorySheet.getDataRange().getValues();
     if (!values || values.length < 2) {
-      return jsonResponse_({ status: 'ok', matches: [] });
+      return jsonResponse_({ status: 'ok', matches: [], total: 0, onOrder: [] });
     }
 
     const header = values[0];
@@ -745,52 +757,64 @@ function handleInventoryLookup_(body) {
     const NAME_COL   = findColumnIndex_(header, h => h.includes('part name'));
     const LOC_COL    = findColumnIndex_(header, h => h.includes('location'));
     const QTY_COL    = findColumnIndex_(header, h => h.includes('qty') || h.includes('on-hand'));
+    const cell = (r, c) => (c !== -1 ? (r[c] === null || r[c] === undefined ? '' : r[c]) : '');
+    const toMatch = r => ({
+      sku: cell(r, SKU_COL), vendor: cell(r, VENDOR_COL), name: cell(r, NAME_COL),
+      location: cell(r, LOC_COL), quantity: cell(r, QTY_COL)
+    });
 
-    const matches = [];
+    let found = [];
 
-    if (skuQuery && SKU_COL !== -1) {
+    // Exact SKU first
+    if (skuQuery) {
       const targetSku = normalizeSku(skuQuery);
-      for (let i = 0; i < rows.length; i++) {
-        if (normalizeSku(rows[i][SKU_COL]) === targetSku) {
-          matches.push({
-            sku: rows[i][SKU_COL],
-            vendor: VENDOR_COL !== -1 ? rows[i][VENDOR_COL] : '',
-            name: NAME_COL !== -1 ? rows[i][NAME_COL] : '',
-            location: LOC_COL !== -1 ? rows[i][LOC_COL] : '',
-            quantity: QTY_COL !== -1 ? rows[i][QTY_COL] : ''
-          });
-        }
-      }
+      found = rows.filter(r => normalizeSku(cell(r, SKU_COL)) === targetSku).map(toMatch);
     }
 
-    const fallbackQuery = (searchText || skuQuery).toLowerCase();
-    if (matches.length === 0 && fallbackQuery && SKU_COL !== -1 && NAME_COL !== -1) {
-      for (let i = 0; i < rows.length; i++) {
-        const rowSku      = (rows[i][SKU_COL]  || '').toString().toLowerCase();
-        const rowName     = (rows[i][NAME_COL]  || '').toString().toLowerCase();
-        const rowLocation = LOC_COL !== -1 ? (rows[i][LOC_COL] || '').toString().toLowerCase() : '';
-
-        if (rowSku.indexOf(fallbackQuery) !== -1 ||
-            rowName.indexOf(fallbackQuery) !== -1 ||
-            rowLocation.indexOf(fallbackQuery) !== -1) {
-          matches.push({
-            sku: rows[i][SKU_COL],
-            vendor: VENDOR_COL !== -1 ? rows[i][VENDOR_COL] : '',
-            name: rows[i][NAME_COL],
-            location: LOC_COL !== -1 ? rows[i][LOC_COL] : '',
-            quantity: rows[i][QTY_COL]
-          });
-        }
-        if (matches.length >= 10) break;
-      }
+    // Otherwise every word must appear somewhere in SKU, name, vendor or location,
+    // so "hex bearing" finds "Flanged Bearing 1/2 Hex"
+    if (found.length === 0 && terms.length) {
+      found = rows.filter(r => {
+        const hay = [cell(r, SKU_COL), cell(r, NAME_COL), cell(r, VENDOR_COL), cell(r, LOC_COL)]
+          .join(' ').toLowerCase();
+        return hay.trim() && terms.every(t => hay.indexOf(t) !== -1);
+      }).map(toMatch);
     }
 
-    return jsonResponse_({ status: 'ok', matches: matches });
+    // In stock first, then by name
+    found.sort((a, b) => {
+      const qa = parseFloat(a.quantity) > 0 ? 0 : 1, qb = parseFloat(b.quantity) > 0 ? 0 : 1;
+      return qa - qb || a.name.toString().localeCompare(b.name.toString());
+    });
+
+    return jsonResponse_({
+      status: 'ok',
+      matches: found.slice(0, MAX_RESULTS),
+      total: found.length,
+      onOrder: findOnOrder_(skuQuery, terms)
+    });
 
   } catch (err) {
     Logger.log('[handleInventoryLookup_] Error: ' + err);
     return jsonResponse_({ status: 'error', message: err.toString() });
   }
+}
+
+// Approved/Ordered requests matching the search, so students see it's already coming before requesting it again
+function findOnOrder_(skuQuery, terms) {
+  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  if (!sheet || (!skuQuery && !terms.length)) return [];
+  const C = PART_REQUESTS_COLS;
+  const target = normalizeSku(skuQuery);
+  return sheet.getDataRange().getValues().slice(1).filter(r => {
+    if (!isReceivable_((r[C.REQUEST_STATUS - 1] || '').toString())) return false;
+    if (target && normalizeSku(r[C.SKU - 1]) === target) return true;
+    const hay = [r[C.SKU - 1], r[C.PART_NAME - 1]].join(' ').toLowerCase();
+    return terms.length && terms.every(t => hay.indexOf(t) !== -1);
+  }).slice(0, 5).map(r => ({
+    requestId: r[C.REQUEST_ID - 1], partName: r[C.PART_NAME - 1] || r[C.SKU - 1] || '',
+    qty: r[C.QUANTITY - 1], status: r[C.REQUEST_STATUS - 1], requester: r[C.REQUESTER - 1]
+  }));
 }
 
 /******************************************************
@@ -1465,6 +1489,8 @@ function handleReceived(sheet, row) {
     addToInventory(sku, partName, quantity, location, detectVendor(partLink));
     const timestamp    = new Date().toLocaleDateString();
     const updatedNotes = (mentorNotes || '') + `\n[${timestamp}] Received ${quantity}x, added to inventory at ${location}`;
+    logMove_({ who: currentUserLabel_('Mentor (sheet)'), sku: sku, partName: partName,
+      qty: quantity, to: cleanLocation_(location), requestId: requestID, how: 'Sheet status' });
     sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(updatedNotes);
     ss.toast(`✅ Added ${quantity}x ${partName || sku} to ${location}`, 'Inventory Updated', 5);
   } catch (err) {
@@ -2139,8 +2165,9 @@ function setupDropdownWorkflow() {
 
   setupConditionalFormatting_(sheet, lastRow);
   ensureSettingsTab_();
+  ensureLocationsTab_();
 
-  SpreadsheetApp.getUi().alert('✅ Setup Complete!', 'Dropdown workflow, inventory indicator, budget columns, row highlighting, and the Settings tab (order days) configured successfully!', SpreadsheetApp.getUi().ButtonSet.OK);
+  SpreadsheetApp.getUi().alert('✅ Setup Complete!', 'Dropdown workflow, inventory indicator, budget columns, row highlighting, the Settings tab (order days), and the Locations tab configured successfully!', SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
 function setupConditionalFormatting_(sheet, lastRow) {
@@ -2200,6 +2227,209 @@ function showWorkflowGuide() {
     '⚪ Gray row = Cancelled',
     SpreadsheetApp.getUi().ButtonSet.OK
   );
+}
+
+/******************************************************
+ * RECEIVING FROM DISCORD (/receive) & LOCATIONS
+ ******************************************************/
+
+const LOCATION_TYPES = ['Subsystem Bin', 'Stock Bin', 'Toolbox', 'Build', 'Other'];
+const MOVES_HEADERS  = ['When', 'Who', 'SKU', 'Part Name', 'Qty', 'To', 'Request ID', 'How'];
+const STUDENT_LOCATION_PREFIX = 'STUDENT-';
+
+// Requests a box can arrive for
+function isReceivable_(status) {
+  return status === STATUS.APPROVED || status === STATUS.ORDERED;
+}
+
+// Locations tab: the list /receive offers. Seeded once from locations already used in Inventory.
+function ensureLocationsTab_() {
+  const ss = SpreadsheetApp.getActive();
+  let tab = ss.getSheetByName(SHEET_NAMES.LOCATIONS);
+  if (tab) return tab;
+
+  tab = ss.insertSheet(SHEET_NAMES.LOCATIONS);
+  tab.getRange(1, 1, 1, 3).setValues([['Location', 'Type', 'Description']]).setFontWeight('bold');
+  tab.setFrozenRows(1);
+
+  const seen = {};
+  const inventory = ss.getSheetByName(SHEET_NAMES.INVENTORY);
+  if (inventory && inventory.getLastRow() > 1) {
+    inventory.getRange(2, INVENTORY_COLS.LOCATION, inventory.getLastRow() - 1, 1).getValues()
+      .forEach(r => cleanLocation_(r[0]).split(',').map(s => s.trim()).filter(Boolean)
+        .forEach(loc => { if (loc.indexOf('UNKNOWN') !== 0) seen[loc] = true; }));
+  }
+  const rows = Object.keys(seen).sort().map(loc => [loc, guessLocationType_(loc), '']);
+  if (rows.length) tab.getRange(2, 1, rows.length, 3).setValues(rows);
+
+  tab.getRange(2, 2, Math.max(tab.getMaxRows() - 1, 1), 1).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(LOCATION_TYPES, true).setAllowInvalid(false).build());
+  tab.getRange(1, 5).setValue('Students pick a Location from this list in /receive (or hand the part to a student). ' +
+    'Add a row for each new bin or toolbox; delete rows that no longer exist.');
+  return tab;
+}
+
+function guessLocationType_(loc) {
+  const l = loc.toUpperCase();
+  if (/TOOLBOX|PACKOUT/.test(l)) return 'Toolbox';
+  if (/^BIN-\d+$|^RACK-|SPARE/.test(l)) return 'Stock Bin';
+  if (/^BIN-/.test(l)) return 'Subsystem Bin';
+  if (/BOT|ASSY|BUILD/.test(l)) return 'Build';
+  return 'Other';
+}
+
+function getLocations_() {
+  const tab = ensureLocationsTab_();
+  if (tab.getLastRow() < 2) return [];
+  return tab.getRange(2, 1, tab.getLastRow() - 1, 2).getValues()
+    .filter(r => (r[0] || '').toString().trim())
+    .map(r => ({ name: r[0].toString().trim(), type: (r[1] || 'Other').toString() }));
+}
+
+// Inventory Moves tab: one row per receipt, so there's a record of who put what where
+// Never throws: a logging problem must not interrupt a receipt that already updated inventory
+function logMove_(move) {
+  try {
+    const ss = SpreadsheetApp.getActive();
+    let tab = ss.getSheetByName(SHEET_NAMES.MOVES);
+    if (!tab) {
+      tab = ss.insertSheet(SHEET_NAMES.MOVES);
+      tab.getRange(1, 1, 1, MOVES_HEADERS.length).setValues([MOVES_HEADERS]).setFontWeight('bold');
+      tab.setFrozenRows(1);
+    }
+    tab.getRange(tab.getLastRow() + 1, 1, 1, MOVES_HEADERS.length).setValues([[
+      new Date(), move.who || '', move.sku || '', move.partName || '', move.qty,
+      move.to || '', move.requestId || '', move.how || ''
+    ]]);
+  } catch (err) {
+    Logger.log('[logMove_] Could not log move (non-fatal): ' + err);
+  }
+}
+
+// Mentor email when Google provides it (it may not inside onEdit)
+function currentUserLabel_(fallback) {
+  try {
+    return Session.getActiveUser().getEmail() || fallback;
+  } catch (err) {
+    return fallback;
+  }
+}
+
+// Action receiveOptions: open requests and locations for /receive autocomplete
+function handleReceiveOptions_(body) {
+  const sheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAMES.PART_REQUESTS);
+  const C = PART_REQUESTS_COLS;
+  const data = sheet.getDataRange().getValues();
+  const requests = [];
+  for (let i = data.length - 1; i >= 1; i--) {
+    const r = data[i];
+    const status = (r[C.REQUEST_STATUS - 1] || '').toString();
+    if (!r[C.REQUEST_ID - 1] || !isReceivable_(status)) continue;
+    requests.push({
+      id: r[C.REQUEST_ID - 1].toString(),
+      partName: (r[C.PART_NAME - 1] || '').toString(),
+      sku: (r[C.SKU - 1] || '').toString(),
+      qty: r[C.QUANTITY - 1] || 1,
+      requester: (r[C.REQUESTER - 1] || '').toString(),
+      status: status
+    });
+  }
+  return jsonResponse_({ status: 'ok', requests: requests, locations: getLocations_() });
+}
+
+// Action receive: a student opened the box and put the parts somewhere
+function handleReceive_(body) {
+  const requestId = (body.requestId || '').toString().trim().toUpperCase();
+  const receiver  = (body.receiver  || 'Discord User').toString().trim();
+  const studentTo = (body.student   || '').toString().trim();
+  let location    = cleanLocation_(body.location || '');
+
+  if (!requestId) return jsonResponse_({ status: 'error', message: 'Request ID is required' });
+  if (!!studentTo === !!location) {
+    return jsonResponse_({ status: 'error', message: 'Pick a location **or** a student (one, not both).' });
+  }
+
+  if (studentTo) {
+    location = STUDENT_LOCATION_PREFIX + studentTo;
+  } else {
+    // Only listed locations, so typos like "UKNOWN" can't come back
+    const match = getLocations_().find(l => l.name.toUpperCase() === location.toUpperCase());
+    if (!match) {
+      return jsonResponse_({ status: 'error',
+        message: `"${location}" isn't on the Locations list. Pick one from the suggestions, or ask a mentor to add it to the Locations tab.` });
+    }
+    location = match.name;
+  }
+
+  try {
+    const result = withScriptLock_(() => {
+      const ss    = SpreadsheetApp.getActive();
+      const sheet = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+      const C     = PART_REQUESTS_COLS;
+      const ids   = sheet.getRange(2, C.REQUEST_ID, Math.max(sheet.getLastRow() - 1, 1), 1).getValues();
+      const idx   = ids.findIndex(r => (r[0] || '').toString().trim().toUpperCase() === requestId);
+      if (idx < 0) return { error: `Request ${requestId} not found.` };
+      const row = idx + 2;
+      const r   = sheet.getRange(row, 1, 1, C.BUILD_SEASON).getValues()[0];
+      const id  = r[C.REQUEST_ID - 1].toString().trim();   // as stored (lower-case hex); Orders match on it
+
+      const status = (r[C.REQUEST_STATUS - 1] || '').toString();
+      if (!isReceivable_(status)) {
+        return { error: `${id} is ${status || 'blank'}, so it can't be received. ` +
+          (status === STATUS.RECEIVED || status === STATUS.COMPLETE ? 'It was already received.' : 'A mentor needs to approve it first.') };
+      }
+
+      const ordersSheet = ss.getSheetByName(SHEET_NAMES.ORDERS);
+      const orderRow = ordersSheet ? findOrderByRequestId(ordersSheet, id) : null;
+      let partName = (r[C.PART_NAME - 1] || '').toString().trim();
+      let sku      = (r[C.SKU - 1] || '').toString().trim();
+      if (orderRow && !partName) partName = (ordersSheet.getRange(orderRow, ORDERS_COLS.PART_NAME).getValue() || '').toString();
+      if (orderRow && !sku)      sku      = (ordersSheet.getRange(orderRow, ORDERS_COLS.SKU).getValue() || '').toString();
+      if (!partName && !sku) return { error: `${id} has no part name or SKU yet; ask a mentor to fill it in first.` };
+
+      const orderedQty = parseFloat(r[C.QUANTITY - 1]) || 1;
+      const qty = parseFloat(body.quantity) > 0 ? parseFloat(body.quantity) : orderedQty;
+
+      addToInventoryUnlocked_(sku, partName, qty, location, detectVendor(r[C.PART_LINK - 1]));
+
+      if (orderRow) {
+        const receivedCell = ordersSheet.getRange(orderRow, ORDERS_COLS.RECEIVED_DATE);
+        if (!receivedCell.getValue()) receivedCell.setValue(new Date());
+        ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_STATUS).setValue('Received');
+      }
+
+      // Setting the status from code doesn't fire onEdit, so nothing prompts or double-adds
+      const short = qty < orderedQty ? ` (ordered ${orderedQty})` : '';
+      const notes = (r[C.MENTOR_NOTES - 1] || '').toString();
+      sheet.getRange(row, C.REQUEST_STATUS).setValue(STATUS.RECEIVED);
+      sheet.getRange(row, C.MENTOR_NOTES).setValue(notes +
+        `\n[${new Date().toLocaleDateString()}] Received ${qty}x${short}, added to inventory at ${location} by ${receiver} (Discord)`);
+
+      logMove_({ who: receiver, sku: sku, partName: partName, qty: qty, to: location, requestId: id, how: '/receive' });
+      SpreadsheetApp.flush();
+
+      return {
+        requestId: id, partName: partName, sku: sku, qty: qty, orderedQty: orderedQty,
+        location: location, requester: (r[C.REQUESTER - 1] || '').toString(),
+        onHand: findInventoryQty_(sku, partName)
+      };
+    });
+
+    if (result.error) return jsonResponse_({ status: 'error', message: result.error });
+    return jsonResponse_(Object.assign({ status: 'ok' }, result));
+  } catch (err) {
+    Logger.log('[handleReceive_] Error: ' + err);
+    return jsonResponse_({ status: 'error', message: err.toString() });
+  }
+}
+
+function findInventoryQty_(sku, partName) {
+  const inv = SpreadsheetApp.getActive().getSheetByName(SHEET_NAMES.INVENTORY);
+  if (!inv || inv.getLastRow() < 2) return null;
+  const rows = inv.getRange(2, 1, inv.getLastRow() - 1, INVENTORY_COLS.QTY_ON_HAND).getValues();
+  const key = (sku || '').toString().trim().toLowerCase();
+  const hit = rows.find(r => key && (r[INVENTORY_COLS.SKU - 1] || '').toString().trim().toLowerCase() === key);
+  return hit ? hit[INVENTORY_COLS.QTY_ON_HAND - 1] : null;
 }
 
 /******************************************************
@@ -2366,6 +2596,8 @@ function retryAddToInventory() {
 
   try {
     addToInventory(sku, partName, quantity, location, detectVendor(partLink));
+    logMove_({ who: currentUserLabel_('Mentor (sheet)'), sku: sku, partName: partName,
+      qty: quantity, to: cleanLocation_(location), requestId: requestID, how: 'Retry Add to Inventory' });
     const timestamp    = new Date().toLocaleDateString();
     sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES)
       .setValue((mentorNotes || '') + `\n[${timestamp}] Received ${quantity}x, manually added to inventory at ${location}`);
