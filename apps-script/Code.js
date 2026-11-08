@@ -107,6 +107,13 @@ function doPost(e) {
 
     Logger.log('[doPost] Action: ' + action);
 
+    // Shared secret from the bot's .env (PARTBOT_SECRET). Enforced once the Script Property is set.
+    const expectedSecret = PropertiesService.getScriptProperties().getProperty('PARTBOT_SECRET');
+    if (expectedSecret && action !== 'health' && body.secret !== expectedSecret) {
+      Logger.log('[doPost] Rejected request with missing or wrong secret, action: ' + action);
+      return jsonResponse_({ status: 'error', message: 'Unauthorized' });
+    }
+
     if (action === 'health') {
       return jsonResponse_({
         status: 'ok',
@@ -252,30 +259,36 @@ function createPartRequest_(data) {
   
   const uuid = Utilities.getUuid().split('-')[0];
   const requestID = 'REQ-' + uuid;
-  const nextRow = sheet.getLastRow() + 1;
-  
   const expeditedShipping = (data.priority === 'Critical') ? 'Expedited' : 'Standard';
-  
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.REQUEST_ID).setValue(requestID);
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.TIMESTAMP).setValue(data.timestamp);
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.REQUESTER).setValue(data.requester);
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.SUBSYSTEM).setValue(data.subsystem);
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.PART_LINK).setValue(data.partLink);
-  
-  if (data.sku) {
-    sheet.getRange(nextRow, PART_REQUESTS_COLS.SKU).setValue(data.sku);
-    Logger.log('[createPartRequest_] User provided SKU: ' + data.sku);
-  }
-  
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.QUANTITY).setValue(data.quantity);
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.PRIORITY).setValue(data.priority);
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.NEEDED_BY).setValue(data.neededBy);
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.MAX_BUDGET).setValue(data.maxBudget);
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.REQUEST_STATUS).setValue(STATUS.SUBMITTED);
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.MENTOR_NOTES).setValue(data.notes);
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.EXPEDITED_SHIPPING).setValue(expeditedShipping);
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.BUDGET_CATEGORY).setValue(data.budgetCategory || '');
-  sheet.getRange(nextRow, PART_REQUESTS_COLS.BUILD_SEASON).setValue(data.buildSeason || '');
+
+  const C = PART_REQUESTS_COLS;
+  const rowValues = new Array(C.BUILD_SEASON).fill('');
+  rowValues[C.REQUEST_ID - 1]         = requestID;
+  rowValues[C.TIMESTAMP - 1]          = data.timestamp;
+  rowValues[C.REQUESTER - 1]          = data.requester;
+  rowValues[C.SUBSYSTEM - 1]          = data.subsystem;
+  rowValues[C.PART_LINK - 1]          = data.partLink;
+  rowValues[C.SKU - 1]                = data.sku || '';
+  rowValues[C.QUANTITY - 1]           = data.quantity;
+  rowValues[C.PRIORITY - 1]           = data.priority;
+  rowValues[C.NEEDED_BY - 1]          = data.neededBy;
+  rowValues[C.MAX_BUDGET - 1]         = data.maxBudget;
+  rowValues[C.REQUEST_STATUS - 1]     = STATUS.SUBMITTED;
+  rowValues[C.MENTOR_NOTES - 1]       = data.notes;
+  rowValues[C.EXPEDITED_SHIPPING - 1] = expeditedShipping;
+  rowValues[C.BUDGET_CATEGORY - 1]    = data.budgetCategory || '';
+  rowValues[C.BUILD_SEASON - 1]       = data.buildSeason || '';
+  if (data.sku) Logger.log('[createPartRequest_] User provided SKU: ' + data.sku);
+
+  // Two requests arriving together must not pick the same row
+  const nextRow = withScriptLock_(() => {
+    const r = sheet.getLastRow() + 1;
+    if (r > sheet.getMaxRows()) sheet.insertRowsAfter(sheet.getMaxRows(), 1);
+    sheet.getRange(r, 1, 1, rowValues.length).setValues([rowValues]);
+    applyRequestRowDefaults_(sheet, r);
+    SpreadsheetApp.flush();
+    return r;
+  });
 
   if (data.partLink) {
     try {
@@ -293,6 +306,32 @@ function createPartRequest_(data) {
   }
 
   return { requestID: requestID, row: nextRow };
+}
+
+// Script-wide lock shared by the web app and onEdit, so concurrent writers don't pick the same row
+function withScriptLock_(fn) {
+  const lock = LockService.getScriptLock();
+  lock.waitLock(20000);
+  try {
+    return fn();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+// Read-only In Inventory indicator (column T); see CLAUDE.md before changing the phrase
+function inInventoryFormula_(row) {
+  return `=IF(OR(Q${row}="${STATUS.RECEIVED}", Q${row}="${STATUS.COMPLETE}"), IF(REGEXMATCH(R${row}, "added to inventory"), "✅", "⚠️"), "")`;
+}
+
+// A new request row gets the same dropdowns as row 2 and the In Inventory formula
+function applyRequestRowDefaults_(sheet, row) {
+  if (row > 2) {
+    const width = sheet.getLastColumn();
+    sheet.getRange(2, 1, 1, width).copyTo(sheet.getRange(row, 1, 1, width),
+      SpreadsheetApp.CopyPasteType.PASTE_DATA_VALIDATION, false);
+  }
+  sheet.getRange(row, PART_REQUESTS_COLS.IN_INVENTORY).setFormula(inInventoryFormula_(row));
 }
 
 /******************************************************
@@ -395,11 +434,9 @@ function enrichPartRequest(requestID, row) {
       extracted = { partName: null, sku: null, price: null };
     }
 
-    // Price from page metadata (og:price:amount etc.) when Gemini finds none
-    if (!extracted.price) {
-      const listed = pageContent.match(/^Listed Price: ([0-9.]+)/m);
-      if (listed) extracted.price = parseFloat(listed[1]);
-    }
+    // The vendor's own price metadata (og:price:amount etc.) beats the AI's reading of the page
+    const listed = pageContent.match(/^Listed Price: ([0-9.]+)/m);
+    if (listed) extracted.price = parseFloat(listed[1]);
 
     // McMaster fallback
     if ((!extracted.partName || !extracted.sku) && partLink.toLowerCase().includes('mcmaster.com')) {
@@ -440,7 +477,8 @@ function enrichPartRequest(requestID, row) {
       Logger.log(`[enrichPartRequest] Skipping SKU write - user provided: ${existingSku}`);
     }
     
-    if (extracted.price) {
+    // Never overwrite a price already on the row (a mentor may have typed the real one)
+    if (extracted.price && existingPrice <= 0) {
       sheet.getRange(row, PART_REQUESTS_COLS.EST_UNIT_PRICE).setValue(extracted.price);
       // Calculate and write Total Est Cost
       const quantity = sheet.getRange(row, PART_REQUESTS_COLS.QUANTITY).getValue() || 1;
@@ -542,6 +580,14 @@ function getListedPrice_(html) {
   return null;
 }
 
+// "1,299.00" or "$12.99" -> number; parseFloat alone turns "1,299.00" into 1
+function parsePrice_(value) {
+  if (value === null || value === undefined || value === '') return null;
+  if (typeof value === 'number') return value > 0 ? value : null;
+  const n = parseFloat(value.toString().replace(/[^0-9.]/g, ''));
+  return n > 0 ? n : null;
+}
+
 // ★ IMPROVED: More aggressive price extraction prompt
 function extractWithGemini_(pageContent, url) {
   try {
@@ -641,7 +687,7 @@ Example of correct output: {"partName":"WCP Flanged Bearing 1/2 Hex","sku":"WCP-
     return {
       partName: extracted.partName || null,
       sku:      extracted.sku      || null,
-      price:    extracted.price    ? parseFloat(extracted.price) : null
+      price:    parsePrice_(extracted.price)
     };
     
   } catch (err) {
@@ -1005,7 +1051,8 @@ function handleCancelRequest_(body) {
 
     const currentStatus = (requestData[PART_REQUESTS_COLS.REQUEST_STATUS - 1] || '').toString().trim();
 
-    if (currentStatus.includes('Ordered') || currentStatus.includes('🛒') ||
+    if (currentStatus.includes('Approved') || currentStatus === STATUS.APPROVED ||
+        currentStatus.includes('Ordered') || currentStatus.includes('🛒') ||
         currentStatus.includes('Received') || currentStatus.includes('📦') ||
         currentStatus.includes('Complete') || currentStatus.includes('✔️')) {
       return jsonResponse_({
@@ -1108,6 +1155,11 @@ function extractPartNameFromUrl(url) {
 }
 
 function addToInventory(sku, partName, quantity, location, vendor) {
+  // Two receipts of the same SKU at once must not both read the old quantity
+  return withScriptLock_(() => addToInventoryUnlocked_(sku, partName, quantity, location, vendor));
+}
+
+function addToInventoryUnlocked_(sku, partName, quantity, location, vendor) {
   const ss             = SpreadsheetApp.getActive();
   const inventorySheet = ss.getSheetByName(SHEET_NAMES.INVENTORY);
 
@@ -1143,13 +1195,19 @@ function addToInventory(sku, partName, quantity, location, vendor) {
     }
   } else {
     const nextRow = inventorySheet.getLastRow() + 1;
-    inventorySheet.getRange(nextRow, INVENTORY_COLS.SKU).setValue(sku || '');
-    inventorySheet.getRange(nextRow, INVENTORY_COLS.VENDOR).setValue(vendor || '');
-    inventorySheet.getRange(nextRow, INVENTORY_COLS.PART_NAME).setValue(partName || '');
-    inventorySheet.getRange(nextRow, INVENTORY_COLS.LOCATION).setValue(location);
-    inventorySheet.getRange(nextRow, INVENTORY_COLS.QTY_ON_HAND).setValue(parseFloat(quantity));
-    inventorySheet.getRange(nextRow, INVENTORY_COLS.LAST_COUNT_DATE).setValue(new Date());
+    const I = INVENTORY_COLS;
+    const rowValues = new Array(I.LAST_COUNT_DATE).fill('');
+    rowValues[I.SKU - 1]             = sku || '';
+    rowValues[I.VENDOR - 1]          = vendor || '';
+    rowValues[I.PART_NAME - 1]       = partName || '';
+    rowValues[I.LOCATION - 1]        = location;
+    rowValues[I.QTY_ON_HAND - 1]     = parseFloat(quantity);
+    rowValues[I.LAST_COUNT_DATE - 1] = new Date();
+    // Write only the columns we own, so Reorder Threshold / Usage Rate stay blank, not overwritten
+    inventorySheet.getRange(nextRow, I.SKU, 1, I.QTY_ON_HAND).setValues([rowValues.slice(0, I.QTY_ON_HAND)]);
+    inventorySheet.getRange(nextRow, I.LAST_COUNT_DATE).setValue(rowValues[I.LAST_COUNT_DATE - 1]);
   }
+  SpreadsheetApp.flush();
 
   return true;
 }
@@ -1244,21 +1302,42 @@ function handleApproved(sheet, row) {
   if (!partName && !sku)    throw new Error('Request must have either Part Name or SKU');
 
   const uuid    = Utilities.getUuid().split('-')[0];
-  const orderID = 'ORD-' + uuid;
   const vendor  = detectVendor(partLink);
-  const nextOrderRow = ordersSheet.getLastRow() + 1;
+  const O = ORDERS_COLS;
 
-  ordersSheet.getRange(nextOrderRow, ORDERS_COLS.ORDER_ID).setValue(orderID);
-  ordersSheet.getRange(nextOrderRow, ORDERS_COLS.INCLUDED_REQUEST_IDS).setValue(requestID);
-  ordersSheet.getRange(nextOrderRow, ORDERS_COLS.VENDOR).setValue(vendor);
-  ordersSheet.getRange(nextOrderRow, ORDERS_COLS.PART_NAME).setValue(partName || '');
-  ordersSheet.getRange(nextOrderRow, ORDERS_COLS.SKU).setValue(sku || '');
-  ordersSheet.getRange(nextOrderRow, ORDERS_COLS.QTY_ORDERED).setValue(quantity || 1);
-  ordersSheet.getRange(nextOrderRow, ORDERS_COLS.FINAL_UNIT_PRICE).setValue(estUnitPrice || '');
-  ordersSheet.getRange(nextOrderRow, ORDERS_COLS.TOTAL_COST).setValue(totalEstCost || '');
-  ordersSheet.getRange(nextOrderRow, ORDERS_COLS.SHIPPING_METHOD).setValue(expeditedShipping || 'Standard');
-  ordersSheet.getRange(nextOrderRow, ORDERS_COLS.ORDER_STATUS).setValue('Approved - Not Yet Ordered');
-  ordersSheet.getRange(nextOrderRow, ORDERS_COLS.MENTOR_NOTES).setValue(mentorNotes || '');
+  // Re-selecting Approved (or two quick edits) must not create a second order
+  const result = withScriptLock_(() => {
+    const existingRow = findOrderByRequestId(ordersSheet, requestID);
+    if (existingRow) {
+      return { existingRow: existingRow, existingId: ordersSheet.getRange(existingRow, O.ORDER_ID).getValue() };
+    }
+    const id = 'ORD-' + uuid;
+    const rowValues = new Array(O.MENTOR_NOTES).fill('');
+    rowValues[O.ORDER_ID - 1]             = id;
+    rowValues[O.INCLUDED_REQUEST_IDS - 1] = requestID;
+    rowValues[O.VENDOR - 1]               = vendor;
+    rowValues[O.PART_NAME - 1]            = partName || '';
+    rowValues[O.SKU - 1]                  = sku || '';
+    rowValues[O.QTY_ORDERED - 1]          = quantity || 1;
+    rowValues[O.FINAL_UNIT_PRICE - 1]     = estUnitPrice || '';
+    rowValues[O.TOTAL_COST - 1]           = totalEstCost || '';
+    rowValues[O.SHIPPING_METHOD - 1]      = expeditedShipping || 'Standard';
+    rowValues[O.ORDER_STATUS - 1]         = 'Approved - Not Yet Ordered';
+    rowValues[O.MENTOR_NOTES - 1]         = mentorNotes || '';
+    const r = ordersSheet.getLastRow() + 1;
+    if (r > ordersSheet.getMaxRows()) ordersSheet.insertRowsAfter(ordersSheet.getMaxRows(), 1);
+    ordersSheet.getRange(r, 1, 1, rowValues.length).setValues([rowValues]);
+    SpreadsheetApp.flush();
+    return { orderID: id };
+  });
+
+  if (result.existingRow) {
+    SpreadsheetApp.getActive().toast(
+      `${requestID} already has order ${result.existingId} (Orders row ${result.existingRow}); no new order created`,
+      '🎃 Already Approved', 6);
+    return;
+  }
+  const orderID = result.orderID;
 
   const timestamp    = new Date().toLocaleDateString();
   const updatedNotes = (mentorNotes || '') + '\n[' + timestamp + '] Approved → ' + orderID;
@@ -1357,9 +1436,17 @@ function handleReceived(sheet, row) {
   if (ordersSheet) {
     const orderRow = findOrderByRequestId(ordersSheet, requestID);
     if (orderRow) {
-      ordersSheet.getRange(orderRow, ORDERS_COLS.RECEIVED_DATE).setValue(new Date());
+      // Keep the first received date if the status is set to Received again
+      const receivedCell = ordersSheet.getRange(orderRow, ORDERS_COLS.RECEIVED_DATE);
+      if (!receivedCell.getValue()) receivedCell.setValue(new Date());
       ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_STATUS).setValue('Received');
     }
+  }
+
+  // Already counted: re-selecting Received must not add the parts to inventory twice
+  if (/added to inventory/.test((mentorNotes || '').toString())) {
+    ss.toast(`${requestID} is already in inventory; quantity not changed`, '📦 Already Received', 6);
+    return;
   }
 
   const locationResponse = ui.prompt(
@@ -2038,8 +2125,7 @@ function setupDropdownWorkflow() {
   statusRange.setValues(values);
 
   for (let i = 2; i <= lastRow; i++) {
-    const formula = `=IF(OR(Q${i}="${STATUS.RECEIVED}", Q${i}="${STATUS.COMPLETE}"), IF(REGEXMATCH(R${i}, "added to inventory"), "✅", "⚠️"), "")`;
-    sheet.getRange(i, PART_REQUESTS_COLS.IN_INVENTORY).setFormula(formula);
+    sheet.getRange(i, PART_REQUESTS_COLS.IN_INVENTORY).setFormula(inInventoryFormula_(i));
   }
 
   sheet.getRange(2, PART_REQUESTS_COLS.IN_INVENTORY, lastRow - 1, 1).setHorizontalAlignment('center');
@@ -2153,6 +2239,12 @@ function retryAddToInventory() {
   if (!partName && !sku) { ui.alert('Error', 'Missing both Part Name and SKU', ui.ButtonSet.OK); return; }
   if (!quantity || isNaN(parseFloat(quantity))) { ui.alert('Error', 'Invalid quantity', ui.ButtonSet.OK); return; }
 
+  if (/added to inventory/.test((mentorNotes || '').toString())) {
+    const again = ui.alert('Already in Inventory',
+      `${requestID} was already added to inventory. Add ${quantity} more anyway?`, ui.ButtonSet.YES_NO);
+    if (again !== ui.Button.YES) return;
+  }
+
   const locationResponse = ui.prompt(
     '📦 Add to Inventory',
     `Request: ${requestID}\nPart: ${partName || sku}\nQuantity: ${quantity}\n\nEnter storage location:`,
@@ -2168,7 +2260,7 @@ function retryAddToInventory() {
     addToInventory(sku, partName, quantity, location, detectVendor(partLink));
     const timestamp    = new Date().toLocaleDateString();
     sheet.getRange(row, PART_REQUESTS_COLS.MENTOR_NOTES)
-      .setValue((mentorNotes || '') + `\n[${timestamp}] Manually added ${quantity}x to inventory at ${location}`);
+      .setValue((mentorNotes || '') + `\n[${timestamp}] Received ${quantity}x, manually added to inventory at ${location}`);
     ui.alert('✅ Success!', `Added ${quantity}x ${partName || sku} to ${location}`, ui.ButtonSet.OK);
   } catch (err) {
     ui.alert('❌ Error', err.toString(), ui.ButtonSet.OK);

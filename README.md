@@ -540,7 +540,7 @@ We welcome contributions from other FRC teams! To contribute:
 git clone https://github.com/YOUR_USERNAME/8793PartBot.git
 cd 8793PartBot/discord-bot
 npm ci
-# Create .env with: DISCORD_TOKEN, CLIENT_ID, GUILD_ID, APPS_SCRIPT_URL
+# Create .env with: DISCORD_TOKEN, CLIENT_ID, GUILD_ID, APPS_SCRIPT_URL, PARTBOT_SECRET
 node bot.js
 ```
 
@@ -553,6 +553,8 @@ pm2 restart discord-bot
 pm2 logs discord-bot --lines 15 --nostream   # expect "Slash commands registered" and "Logged in"
 ```
 Slash commands re-register on startup.
+
+**Shared secret:** the bot sends `PARTBOT_SECRET` from its `.env` with every call, and the web app rejects calls without it once the Apps Script Script Property `PARTBOT_SECRET` holds the same value. Set it in both places (Project Settings → Script Properties in the Apps Script editor); never commit it. If Discord commands start replying "Unauthorized", the two values don't match.
 
 **Apps Script:** deployed with [clasp](https://github.com/google/clasp) from `apps-script/`.
 1. Check the live project hasn't been edited in the browser since the last push: `clasp pull` into a scratch folder (copy `.clasp.json` there) and diff against `Code.js`. Bring any browser edits into git first.

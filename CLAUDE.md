@@ -55,7 +55,7 @@ Verified in the local checkout:
 └── CLAUDE.md
 ```
 
-Older handoffs may describe `Code.gs`, `SharedConstants.gs`, `.env.example`, or `check-commands.js`; none are in this repo (`check-commands.js` exists only on the VM, untracked). The tracked Apps Script source is `Code.js`, mapped to the live project by `apps-script/.clasp.json`. The bot's `.env` needs `DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, `APPS_SCRIPT_URL`.
+Older handoffs may describe `Code.gs`, `SharedConstants.gs`, `.env.example`, or `check-commands.js`; none are in this repo (`check-commands.js` exists only on the VM, untracked). The tracked Apps Script source is `Code.js`, mapped to the live project by `apps-script/.clasp.json`. The bot's `.env` needs `DISCORD_TOKEN`, `CLIENT_ID`, `GUILD_ID`, `APPS_SCRIPT_URL`, `PARTBOT_SECRET`.
 
 ## Environments and Deployment
 
@@ -79,8 +79,9 @@ Do not assume a local feature is deployed merely because it works in the local c
 
 Never commit credentials or paste them into chat.
 
-- `discord-bot/.env` on the VM: Discord token, client ID, guild ID, and Apps Script web-app URL.
-- Apps Script Script Properties: `GEMINI_API_KEY` and optional Discord webhook URL / role ID.
+- `discord-bot/.env` on the VM: Discord token, client ID, guild ID, Apps Script web-app URL, and `PARTBOT_SECRET`.
+- Apps Script Script Properties: `GEMINI_API_KEY`, `PARTBOT_SECRET`, and optional Discord webhook URL / role ID.
+- `doPost` rejects every action except `health` unless `body.secret` equals the `PARTBOT_SECRET` property (not enforced while the property is unset). All bot calls go through `postToAppsScript()`, which attaches it.
 - `.env.example` was not present in the verified checkout; update setup docs or add a sanitized example when appropriate.
 
 ## Discord Commands and API
@@ -162,6 +163,14 @@ The `🎃 PartBot` sheet menu includes `📦 Retry Add to Inventory` and `🔍 F
 - Students have been asked to add OnShape custom properties: Part Number, Vendor, Vendor Link, Description, Subsystem.
 - Vendor prefixes: WCP, REV, AM, VEX, McMaster, CTRE.
 - Target: ready by season kickoff.
+
+### Concurrency and idempotency
+
+- Row-appending writes (`createPartRequest_`, `handleApproved`, `addToInventory`) run under `withScriptLock_()` and write the row with one `setValues`, so simultaneous requests can't share a row.
+- Setting Approved again doesn't create a second order if one already lists the request ID. Setting Received again keeps the first received date and doesn't re-add inventory when Mentor Notes already say `added to inventory`. These guards were added after duplicate orders appeared in 2026.
+- New request rows copy row 2's data validation and get the In Inventory formula (`applyRequestRowDefaults_`).
+- Enrichment never overwrites an existing Est Unit Price, and the vendor page's price metadata takes precedence over Gemini's reading.
+- `/cancelrequest` is refused once a request is Approved, because an order row already exists.
 
 ## Working Conventions
 

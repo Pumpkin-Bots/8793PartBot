@@ -41,10 +41,20 @@ const TOKEN = process.env.DISCORD_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const GUILD_ID = process.env.GUILD_ID;
 const APPS_SCRIPT_URL = process.env.APPS_SCRIPT_URL;
+// Shared secret checked by Apps Script doPost; must match the PARTBOT_SECRET Script Property
+const PARTBOT_SECRET = process.env.PARTBOT_SECRET || '';
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !APPS_SCRIPT_URL) {
   console.error('❌ Missing environment variables');
   process.exit(1);
+}
+if (!PARTBOT_SECRET) {
+  console.warn('⚠️ PARTBOT_SECRET is not set; Apps Script will reject requests once its secret is configured');
+}
+
+// Every call to the Apps Script web app goes through here so the secret is always attached
+function postToAppsScript(payload) {
+  return axios.post(APPS_SCRIPT_URL, { ...payload, secret: PARTBOT_SECRET });
 }
 
 function formatDate(value, fallback = 'Unknown') {
@@ -131,10 +141,10 @@ const commands = [
       option.setName('sku').setDescription('Specific SKU/part number (overrides AI detection)').setRequired(false)
     )
     .addIntegerOption(option =>
-      option.setName('qty').setDescription('Quantity').setRequired(false)
+      option.setName('qty').setDescription('Quantity').setRequired(false).setMinValue(1)
     )
     .addNumberOption(option =>
-      option.setName('maxbudget').setDescription('Max budget (USD)').setRequired(false)
+      option.setName('maxbudget').setDescription('Max budget (USD)').setRequired(false).setMinValue(0)
     )
     .addStringOption(option =>
       option.setName('priority').setDescription('Priority').setRequired(false)
@@ -271,7 +281,7 @@ async function handleRequestPart(interaction) {
       buildSeason: season
     };
 
-    const response = await axios.post(APPS_SCRIPT_URL, payload);
+    const response = await postToAppsScript(payload);
     const data = response.data;
 
     if (data.status !== 'ok') {
@@ -314,7 +324,7 @@ async function handleBudgetStatus(interaction) {
   await interaction.deferReply({ ephemeral: false });   // posted to the channel
 
   try {
-    const response = await axios.post(APPS_SCRIPT_URL, { action: 'budgetStatus' });
+    const response = await postToAppsScript({ action: 'budgetStatus' });
     const data = response.data;
 
     if (data.status !== 'ok') {
@@ -393,7 +403,7 @@ async function handleCancelRequest(interaction) {
       reason: reason || 'No reason provided'
     };
 
-    const response = await axios.post(APPS_SCRIPT_URL, payload);
+    const response = await postToAppsScript(payload);
     const data = response.data;
 
     if (data.status !== 'ok') {
@@ -421,7 +431,7 @@ async function handleOpenOrders(interaction) {
 
   try {
     const payload = { action: 'openOrders' };
-    const response = await axios.post(APPS_SCRIPT_URL, payload);
+    const response = await postToAppsScript(payload);
     const data = response.data;
 
     if (data.status !== 'ok') {
@@ -503,7 +513,7 @@ async function handleOrderStatus(interaction) {
       orderId
     };
 
-    const response = await axios.post(APPS_SCRIPT_URL, payload);
+    const response = await postToAppsScript(payload);
     const data = response.data;
 
     if (data.status !== 'ok') {
@@ -581,7 +591,7 @@ async function handleInventory(interaction) {
       search: search
     };
 
-    const response = await axios.post(APPS_SCRIPT_URL, payload);
+    const response = await postToAppsScript(payload);
     const data = response.data;
 
     if (data.status !== 'ok') {
