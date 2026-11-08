@@ -260,7 +260,6 @@ The repository does not currently include `.env.example` or `SharedConstants.gs`
   link:https://...          # Optional: Vendor URL (triggers AI enrichment)
   sku:WCP-0785              # Optional: Exact SKU (overrides AI detection) ⭐ NEW!
   qty:2                     # Optional: Quantity (default: 1)
-  maxbudget:50              # Optional: Maximum budget in USD
   priority:High             # Optional: Critical, High, Medium, Low
   notes:"For prototype"     # Optional: Additional context
 ```

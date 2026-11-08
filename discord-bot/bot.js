@@ -143,9 +143,6 @@ const commands = [
     .addIntegerOption(option =>
       option.setName('qty').setDescription('Quantity').setRequired(false).setMinValue(1)
     )
-    .addNumberOption(option =>
-      option.setName('maxbudget').setDescription('Max budget (USD)').setRequired(false).setMinValue(0)
-    )
     .addStringOption(option =>
       option.setName('priority').setDescription('Priority').setRequired(false)
         .addChoices(
@@ -259,7 +256,6 @@ async function handleRequestPart(interaction) {
   const link = interaction.options.getString('link') || '';
   const sku = interaction.options.getString('sku') || '';
   const qty = interaction.options.getInteger('qty') || 1;
-  const maxBudget = interaction.options.getNumber('maxbudget') || '';
   const priority = interaction.options.getString('priority') || 'Medium';
   const notes = interaction.options.getString('notes') || '';
 
@@ -274,7 +270,6 @@ async function handleRequestPart(interaction) {
       sku: sku,
       quantity: qty,
       neededBy: '',
-      maxBudget: maxBudget,
       priority: priority,
       notes: `[Discord] ${notes}`.trim(),
       budgetCategory: category,

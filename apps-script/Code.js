@@ -33,7 +33,7 @@ const PART_REQUESTS_COLS = {
   VENDOR_STOCK_STATUS: 12,
   EST_UNIT_PRICE: 13,
   TOTAL_EST_COST: 14,
-  MAX_BUDGET: 15,
+  MAX_BUDGET: 15,  // no longer filled; /requestpart dropped the maxbudget option (2026-11-08)
   BUDGET_STATUS: 16,
   REQUEST_STATUS: 17,
   MENTOR_NOTES: 18,
@@ -189,7 +189,6 @@ function handleDiscordRequest_(body) {
       sku: body.sku || '',
       quantity: body.quantity || 1,
       neededBy: body.neededBy || '',
-      maxBudget: body.maxBudget || '',
       priority: body.priority || 'Medium',
       notes: body.notes || '',
       budgetCategory: budgetCategory,
@@ -209,7 +208,6 @@ function handleDiscordRequest_(body) {
       quantity: requestData.quantity,
       priority: requestData.priority,
       neededBy: requestData.neededBy,
-      maxBudget: requestData.maxBudget,
       notes: requestData.notes
     });
 
@@ -272,7 +270,6 @@ function createPartRequest_(data) {
   rowValues[C.QUANTITY - 1]           = data.quantity;
   rowValues[C.PRIORITY - 1]           = data.priority;
   rowValues[C.NEEDED_BY - 1]          = data.neededBy;
-  rowValues[C.MAX_BUDGET - 1]         = data.maxBudget;
   rowValues[C.REQUEST_STATUS - 1]     = STATUS.SUBMITTED;
   rowValues[C.MENTOR_NOTES - 1]       = data.notes;
   rowValues[C.EXPEDITED_SHIPPING - 1] = expeditedShipping;
@@ -363,7 +360,6 @@ function sendProcurementNotification_(request) {
       { name: 'Subsystem', value: request.subsystem || '—', inline: true },
       { name: 'Priority', value: request.priority || 'Medium', inline: true },
       { name: 'Quantity', value: String(request.quantity || ''), inline: true },
-      { name: 'Max Budget', value: request.maxBudget ? `$${request.maxBudget}` : '—', inline: true },
       { name: 'Part Name', value: request.partName || '(AI enrichment pending)', inline: false },
       { name: 'SKU', value: request.sku || '(AI enrichment pending)', inline: true },
       { name: 'Link', value: request.link || '—', inline: false }
