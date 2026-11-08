@@ -28,7 +28,7 @@ Google Apps Script web app (tracked locally as apps-script/Code.js)
   - Handles onEdit status workflow, menus, and formatting
         |
         v
-Google Sheets — Part Requests / Orders / Inventory / Budget
+Google Sheets — Part Requests / Orders / Inventory / Budget / Settings
 
 Google Gemini API (gemini-2.5-flash)
   - Extracts part name, SKU, and price from product pages
@@ -103,6 +103,8 @@ Apps Script `doPost` actions include `health`, `discordRequest`, `inventory`, `o
 **Orders (A–O):** Order ID | Included Request IDs | Vendor | Part Name | SKU | Qty Ordered | Final Unit Price | Total Cost | Order Date | Shipping Method | Tracking | ETA | Received Date | Order Status | Mentor Notes
 
 **Inventory (A–I):** SKU | Vendor | Part Name | Location | Qty On-Hand | Reorder Threshold | Usage Rate | Last Count Date | Notes
+
+**Settings (label in A, value in B):** `Ordering Mode` (In-season / Off-season dropdown), `In-season Order Days`, `Off-season Order Days` (comma-separated weekdays). Read by `getOrderSchedule_()`, which finds rows by label and creates the tab with defaults via `ensureSettingsTab_()` if missing. The `/requestpart` reply shows the current mode's days (`orderSchedule` in the `discordRequest` response, formatted by `formatOrderSchedule` in `bot.js`); the student's season option does not affect it.
 
 IDs use `REQ-xxxxxxxx` and `ORD-xxxxxxxx` formats. Verify column constants against the live sheet before adding or moving columns.
 

@@ -14,7 +14,8 @@ const SHEET_NAMES = {
   PART_REQUESTS: 'Part Requests',
   ORDERS: 'Orders',
   INVENTORY: 'Inventory',
-  BUDGET: 'Budget'
+  BUDGET: 'Budget',
+  SETTINGS: 'Settings'
 };
 
 const PART_REQUESTS_COLS = {
@@ -213,10 +214,19 @@ function handleDiscordRequest_(body) {
       Logger.log('[handleDiscordRequest_] Budget check failed (non-fatal): ' + budgetErr);
     }
 
-    return jsonResponse_({ 
-      status: 'ok', 
+    // When mentors place orders, from the Settings tab, for the Discord reply
+    let orderSchedule = null;
+    try {
+      orderSchedule = getOrderSchedule_();
+    } catch (scheduleErr) {
+      Logger.log('[handleDiscordRequest_] Order schedule lookup failed (non-fatal): ' + scheduleErr);
+    }
+
+    return jsonResponse_({
+      status: 'ok',
       requestID: requestID,
-      budget: budgetSnapshot
+      budget: budgetSnapshot,
+      orderSchedule: orderSchedule
     });
 
   } catch (err) {
@@ -1927,6 +1937,67 @@ function budgetAfterRequest_(requestRow) {
   };
 }
 
+/******************************************************
+ * ORDER SCHEDULE (Settings tab)
+ * Mentors set which days orders are reviewed and placed.
+ * Rows are found by the label in column A, so they can be moved.
+ ******************************************************/
+
+const SETTINGS_LABELS = {
+  MODE:       'Ordering Mode',
+  IN_SEASON:  'In-season Order Days',
+  OFF_SEASON: 'Off-season Order Days'
+};
+
+const WEEKDAYS = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// Creates the Settings tab with defaults if it is missing; returns the sheet
+function ensureSettingsTab_() {
+  const ss  = SpreadsheetApp.getActive();
+  let   tab = ss.getSheetByName(SHEET_NAMES.SETTINGS);
+  if (tab) return tab;
+
+  tab = ss.insertSheet(SHEET_NAMES.SETTINGS);
+  tab.getRange(1, 1, 4, 2).setValues([
+    ['Setting', 'Value'],
+    [SETTINGS_LABELS.MODE,       'Off-season'],
+    [SETTINGS_LABELS.IN_SEASON,  'Monday, Thursday'],
+    [SETTINGS_LABELS.OFF_SEASON, 'Monday']
+  ]);
+  tab.getRange(1, 1, 1, 2).setFontWeight('bold');
+  tab.getRange(2, 2).setDataValidation(
+    SpreadsheetApp.newDataValidation().requireValueInList(BUILD_SEASONS, true).setAllowInvalid(false)
+      .setHelpText('Switch to In-season at kickoff and back to Off-season after the last event.').build());
+  tab.getRange(6, 1).setValue(
+    'Order days are shown to students after /requestpart. List weekdays separated by commas, e.g. "Monday, Thursday".');
+  tab.setColumnWidth(1, 200);
+  tab.setColumnWidth(2, 200);
+  return tab;
+}
+
+// Turns "Tue, friday & Sat" into ['Tuesday', 'Friday', 'Saturday']; unknown words are ignored
+function parseWeekdays_(text) {
+  return (text || '').toString()
+    .split(/,|&|\/|\band\b/i)
+    .map(s => s.trim().toLowerCase())
+    .filter(Boolean)
+    .map(s => WEEKDAYS.find(d => d.toLowerCase().startsWith(s.slice(0, 3))))
+    .filter((d, i, all) => d && all.indexOf(d) === i);
+}
+
+// { mode: 'In-season' | 'Off-season', days: [...] }, or null if no valid days are set
+function getOrderSchedule_() {
+  const values   = ensureSettingsTab_().getDataRange().getValues();
+  const valueFor = label => {
+    const row = values.find(r => (r[0] || '').toString().trim() === label);
+    return row ? row[1] : '';
+  };
+
+  const mode = valueFor(SETTINGS_LABELS.MODE).toString().trim() === 'In-season' ? 'In-season' : 'Off-season';
+  const days = parseWeekdays_(valueFor(mode === 'In-season' ? SETTINGS_LABELS.IN_SEASON : SETTINGS_LABELS.OFF_SEASON));
+  return days.length ? { mode: mode, days: days } : null;
+}
+
 // Menu-callable version
 function refreshAllBudgetStatuses() {
   const ss    = SpreadsheetApp.getActive();
@@ -1986,8 +2057,9 @@ function setupDropdownWorkflow() {
     .setNumberFormat('m/d/yyyy');
 
   setupConditionalFormatting_(sheet, lastRow);
+  ensureSettingsTab_();
 
-  SpreadsheetApp.getUi().alert('✅ Setup Complete!', 'Dropdown workflow, inventory indicator, budget columns, and row highlighting configured successfully!', SpreadsheetApp.getUi().ButtonSet.OK);
+  SpreadsheetApp.getUi().alert('✅ Setup Complete!', 'Dropdown workflow, inventory indicator, budget columns, row highlighting, and the Settings tab (order days) configured successfully!', SpreadsheetApp.getUi().ButtonSet.OK);
 }
 
 function setupConditionalFormatting_(sheet, lastRow) {

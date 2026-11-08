@@ -97,6 +97,19 @@ Every request counts against a line of the **HMB Robotics budget spreadsheet** (
 - `/budgetstatus` shows the FRC total and every line under FRC Expenses in the budget sheet (Competition Registration, Travel & Food, Robot Hardware & Field Pieces, Marketing/Spirit, Tools & Supplies) with spent, pending, and remaining. Lines PartBot purchases don't use show finance's numbers only.
 - PartBot copies the budget amounts into its **Budget** tab hourly, on each Discord command, and from **🎃 PartBot → 🔄 Sync Budget**
 
+### 🗓️ Order Days
+`/requestpart` also tells students when mentors review and place orders, for example: *"Mentors review and place orders twice a week during build season: **Monday and Thursday**."*
+
+The days come from the **Settings** tab, which PartBot creates with defaults the first time it's needed (or from **⚙️ Setup Dropdown Workflow**):
+
+| Setting | Default | Notes |
+|---|---|---|
+| Ordering Mode | Off-season | Dropdown. Switch to **In-season** at kickoff and back after the last event. |
+| In-season Order Days | Monday, Thursday | Weekdays separated by commas |
+| Off-season Order Days | Monday | |
+
+The message follows **Ordering Mode**, not the season a student picks on the request, because ordering happens on the team's current schedule. Rows are found by their label in column A, so they can be moved. If the day list is blank or unreadable, the line is simply left out of the reply.
+
 ### 🚫 Request Cancellation
 Students can cancel their own requests:
 ```
@@ -260,6 +273,7 @@ The repository does not currently include `.env.example` or `SharedConstants.gs`
 5. Discord shows: `SKU: **WCP-0785** (user-specified)` if you provided it
 6. Request ID returned (e.g., REQ-12345678)
 7. Discord shows what's left in the request's budget line after this purchase
+8. Discord shows which days mentors review and place orders (from the **Settings** tab)
 
 ### `/budgetstatus` - FRC Budget
 ```

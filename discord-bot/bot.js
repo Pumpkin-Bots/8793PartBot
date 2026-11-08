@@ -70,6 +70,17 @@ function formatMoney(value) {
   return n < 0 ? '-' + s : s;
 }
 
+// "🗓️ Mentors review and place orders twice a week during build season: Monday and Thursday."
+// schedule = { mode: 'In-season' | 'Off-season', days: ['Tuesday', ...] } from the Settings tab
+function formatOrderSchedule(schedule) {
+  if (!schedule || !Array.isArray(schedule.days) || schedule.days.length === 0) return '';
+  const days  = schedule.days;
+  const count = ['once', 'twice'][days.length - 1] || `${days.length} times`;
+  const when  = schedule.mode === 'In-season' ? 'during build season' : 'in the off-season';
+  const list  = days.length === 1 ? days[0] : `${days.slice(0, -1).join(', ')} and ${days[days.length - 1]}`;
+  return `🗓️ Mentors review and place orders ${count} a week ${when}: **${list}**.`;
+}
+
 function budgetBar(percentUsed, width = 16) {
   const filled = Math.max(0, Math.min(width, Math.round(percentUsed / 100 * width)));
   return '█'.repeat(filled) + '░'.repeat(width - filled);
@@ -287,6 +298,9 @@ async function handleRequestPart(interaction) {
         responseLines.push(`💰 **${b.line}**: ${formatMoney(b.remaining)} left of ${formatMoney(b.budget)}. No price found yet, so this request isn't counted until a mentor adds one.`);
       }
     }
+
+    const scheduleLine = formatOrderSchedule(data.orderSchedule);
+    if (scheduleLine) responseLines.push(scheduleLine);
 
     return interaction.editReply(responseLines.join('\n'));
 
