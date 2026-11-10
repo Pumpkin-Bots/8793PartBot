@@ -970,6 +970,18 @@ function handleOpenOrders_(body) {
     const ordValues = ordSheet.getDataRange().getValues();
     const orders = [];
 
+    // Requests marked 🏠 At Mentor, so the order can say who has the package
+    const holders = {};
+    const reqForHolders = ss.getSheetByName(SHEET_NAMES.PART_REQUESTS);
+    if (reqForHolders) {
+      reqForHolders.getDataRange().getValues().slice(1).forEach(r => {
+        if (r[PART_REQUESTS_COLS.REQUEST_STATUS - 1] === STATUS.DELIVERED_OFFSITE) {
+          holders[(r[PART_REQUESTS_COLS.REQUEST_ID - 1] || '').toString().trim()] =
+            offsiteHolder_(r[PART_REQUESTS_COLS.MENTOR_NOTES - 1]) || 'a mentor';
+        }
+      });
+    }
+
     if (ordValues && ordValues.length > 1) {
       for (let i = 1; i < ordValues.length; i++) {
         const row = ordValues[i];
@@ -993,7 +1005,8 @@ function handleOpenOrders_(body) {
             shipping:         row[9] ? row[9].toString() : '',
             tracking:         row[10] ? row[10].toString() : '',
             eta:              row[11] || null,
-            status:           status || 'Unknown'
+            status:           status || 'Not yet ordered',
+            holder:           (row[1] ? row[1].toString() : '').split(',').map(x => holders[x.trim()]).filter(Boolean)[0] || ''
           });
         }
       }
@@ -1351,7 +1364,7 @@ function handleApproved(sheet, row) {
     rowValues[O.FINAL_UNIT_PRICE - 1]     = estUnitPrice || '';
     rowValues[O.TOTAL_COST - 1]           = totalEstCost || '';
     rowValues[O.SHIPPING_METHOD - 1]      = expeditedShipping || 'Standard';
-    rowValues[O.ORDER_STATUS - 1]         = 'Approved - Not Yet Ordered';
+    rowValues[O.ORDER_STATUS - 1]         = '';  // blank until ordered; the column only accepts its own dropdown values
     rowValues[O.MENTOR_NOTES - 1]         = mentorNotes || '';
     const r = ordersSheet.getLastRow() + 1;
     if (r > ordersSheet.getMaxRows()) ordersSheet.insertRowsAfter(ordersSheet.getMaxRows(), 1);
@@ -1389,7 +1402,7 @@ function handleOrdered(sheet, row) {
       if (!existingDate) {
         ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_DATE).setValue(today);
       }
-      ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_STATUS).setValue(STATUS.ORDERED);
+      setOrderStatus_(ordersSheet, orderRow, 'Ordered');
       Logger.log(`[handleOrdered] Updated order at row ${orderRow} for ${requestID}`);
     } else {
       Logger.log(`[handleOrdered] No linked order found for ${requestID} — skipping`);
@@ -1468,7 +1481,7 @@ function handleReceived(sheet, row) {
       // Keep the first received date if the status is set to Received again
       const receivedCell = ordersSheet.getRange(orderRow, ORDERS_COLS.RECEIVED_DATE);
       if (!receivedCell.getValue()) receivedCell.setValue(new Date());
-      ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_STATUS).setValue('Received');
+      setOrderStatus_(ordersSheet, orderRow, 'Received');
     }
   }
 
@@ -2412,7 +2425,7 @@ function handleReceive_(body) {
       if (orderRow) {
         const receivedCell = ordersSheet.getRange(orderRow, ORDERS_COLS.RECEIVED_DATE);
         if (!receivedCell.getValue()) receivedCell.setValue(new Date());
-        ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_STATUS).setValue('Received');
+        setOrderStatus_(ordersSheet, orderRow, 'Received');
       }
 
       // Setting the status from code doesn't fire onEdit, so nothing prompts or double-adds
@@ -2692,14 +2705,20 @@ function markDeliveredOffsite_(sheet, row, holder, loggedBy) {
     `[${new Date().toLocaleDateString()}] 🏠 Delivered to ${who} (not in shop yet)` +
     (loggedBy && loggedBy !== who ? `, logged by ${loggedBy}` : ''));
 
-  // Received Date stays blank until it reaches the shop, so /openorders keeps listing it
+  // Received Date stays blank until it reaches the shop, so /openorders keeps listing it.
+  // Order Status (N) only accepts its dropdown values, so "who has it" goes in the order's notes.
   const ordersSheet = SpreadsheetApp.getActive().getSheetByName(SHEET_NAMES.ORDERS);
   const orderRow = ordersSheet ? findOrderByRequestId(ordersSheet, requestId) : null;
   if (orderRow) {
-    ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_STATUS).setValue(`🏠 At ${who}'s, not in shop yet`);
+    const notesCell = ordersSheet.getRange(orderRow, ORDERS_COLS.MENTOR_NOTES);
+    const orderNotes = (notesCell.getValue() || '').toString();
+    notesCell.setValue((orderNotes ? orderNotes + '\n' : '') +
+      `[${new Date().toLocaleDateString()}] 🏠 At ${who}'s, not in shop yet`);
     if (!ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_DATE).getValue()) {
       ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_DATE).setValue(new Date());
     }
+    const current = (ordersSheet.getRange(orderRow, ORDERS_COLS.ORDER_STATUS).getValue() || '').toString();
+    if (!current) setOrderStatus_(ordersSheet, orderRow, 'Ordered');
   }
   return who;
 }
@@ -2769,4 +2788,20 @@ function ensureStatusOptions_() {
     SpreadsheetApp.newDataValidation().requireValueInList(wanted, true).setAllowInvalid(false).build());
   setupConditionalFormatting_(sheet, lastRow);
   Logger.log('[ensureStatusOptions_] Status dropdown updated');
+}
+
+// Order Status (N) has a mentor-maintained dropdown (Ordered, Shipped, Received, ...).
+// Script writes are checked against it, so skip a value it doesn't allow instead of failing the whole action.
+function setOrderStatus_(ordersSheet, row, value) {
+  const cell = ordersSheet.getRange(row, ORDERS_COLS.ORDER_STATUS);
+  const rule = cell.getDataValidation && cell.getDataValidation();
+  if (rule && rule.getCriteriaType && rule.getCriteriaType() === SpreadsheetApp.DataValidationCriteria.VALUE_IN_LIST) {
+    const allowed = rule.getCriteriaValues()[0] || [];
+    if (allowed.indexOf(value) === -1) {
+      Logger.log(`[setOrderStatus_] "${value}" isn't in the Order Status dropdown on row ${row}; left as is`);
+      return false;
+    }
+  }
+  cell.setValue(value);
+  return true;
 }

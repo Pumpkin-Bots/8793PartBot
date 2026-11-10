@@ -48,7 +48,6 @@ const PARTBOT_SECRET = process.env.PARTBOT_SECRET || '';
 const RECEIVING_ROLE_ID = process.env.RECEIVING_ROLE_ID || '';
 // Optional: only members with this Discord role (or server managers) can use /delivered
 const MENTOR_ROLE_ID = process.env.MENTOR_ROLE_ID || '';
-const OFFSITE_STATUS = '🏠 At Mentor (not in shop)';
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID || !APPS_SCRIPT_URL) {
   console.error('❌ Missing environment variables');
@@ -488,21 +487,22 @@ async function handleOpenOrders(interaction) {
     }
 
     const lines = [];
-    const offsite = orders.filter(o => (o.status || '').startsWith('🏠'));
+    const offsite = orders.filter(o => o.holder);
     if (offsite.length) {
       lines.push(`🏠 **Arrived at a mentor's home, not in the shop yet** (${offsite.length})`);
       for (const o of offsite) {
-        lines.push(`• **${o.orderId}** — ${o.partName || '(no name)'} ×${o.qty || '?'} · ${o.status.replace(/^🏠\s*/, '')}`);
+        lines.push(`• **${o.orderId}** — ${o.partName || '(no name)'} ×${o.qty || '?'} · at ${o.holder}'s`);
       }
       lines.push('');
     }
     lines.push('📦 **Open Orders (not yet received)**');
+    const inTransit = orders.filter(o => !o.holder);
 
-    if (orders.length === 0) {
+    if (inTransit.length === 0) {
       lines.push('No open orders.\n');
     } else {
-      const shown = orders.slice(0, 15);
-      lines.push(`Total: ${orders.length}\n`);
+      const shown = inTransit.slice(0, 15);
+      lines.push(`Total: ${inTransit.length}\n`);
 
       for (const o of shown) {
         lines.push(
@@ -713,7 +713,6 @@ async function handleReceiveAutocomplete(interaction) {
 
   if (focused.name === 'request') {
     choices = receiveOptions.requests
-      .filter(r => interaction.commandName !== 'delivered' || r.status !== OFFSITE_STATUS)
       .filter(r => matchesAll(`${r.id} ${r.partName} ${r.sku} ${r.requester} ${r.holder || ''}`))
       .map(r => ({
         name: truncate(`${r.holder ? `🏠 ${r.holder} · ` : ''}${r.partName || r.sku || '(no name yet)'} ×${r.qty} · ${r.requester} · ${r.id}`, 100),
