@@ -362,7 +362,7 @@ async function handleRequestPart(interaction) {
 }
 
 async function handleBudgetStatus(interaction) {
-  await interaction.deferReply({ ephemeral: false });   // posted to the channel
+  await interaction.deferReply({ ephemeral: true });   // only the person who ran it sees it
 
   try {
     const response = await postToAppsScript({ action: 'budgetStatus' });

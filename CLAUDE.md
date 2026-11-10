@@ -89,7 +89,7 @@ Never commit credentials or paste them into chat.
 The verified `bot.js` registers these guild-scoped commands through `Routes.applicationGuildCommands`:
 
 - `/requestpart`: subsystem, category, season (required), optional product link, SKU, quantity, priority, and notes (the max budget option was removed 2026-11-08; column O is no longer filled)
-- `/budgetstatus`: FRC total (budget, spent, remaining $ and %) followed by every FRC Expenses line, posted to the channel, via the `budgetStatus` action. It replaced a separate `/requestbudget` command.
+- `/budgetstatus`: FRC total (budget, spent, remaining $ and %) followed by every FRC Expenses line, visible only to the person who ran it (ephemeral; changed 2026-11-09), via the `budgetStatus` action. It replaced a separate `/requestbudget` command.
 - `/cancelrequest`: request ID and optional reason
 - `/inventory`: exact SKU, or keyword search where every word must match SKU/name/vendor/location; in-stock first, up to 15, plus matching Approved/Ordered requests (`onOrder`)
 - `/receive`: request (autocomplete), location (autocomplete from the Locations tab) **or** student (user picker), optional qty. Posts a public "It's here!" message pinging the requester (`guild.members.search` by username). Optional `RECEIVING_ROLE_ID` in `.env` limits it to a role. Autocomplete reads a cache refreshed every 2 minutes via `receiveOptions`, because Apps Script is too slow for Discord's 3-second autocomplete limit. Requested by Franz as a student user story (2026-11-08).

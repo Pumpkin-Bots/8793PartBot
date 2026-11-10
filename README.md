@@ -304,7 +304,7 @@ The repository does not currently include `.env.example` or `SharedConstants.gs`
 ```
 /budgetstatus
 ```
-Posted to the channel. Starts with the FRC total (budget, total spent = logged by finance + pending in PartBot, remaining in dollars and percent), then every line under **FRC Expenses** in the HMB Robotics budget sheet (Competition Registration, Travel & Food, Robot Hardware & Field Pieces, Marketing/Spirit, Tools & Supplies, plus any line finance adds) with budget, spent, pending, and remaining.
+Only you see the reply (it isn't posted to the channel). Starts with the FRC total (budget, total spent = logged by finance + pending in PartBot, remaining in dollars and percent), then every line under **FRC Expenses** in the HMB Robotics budget sheet (Competition Registration, Travel & Food, Robot Hardware & Field Pieces, Marketing/Spirit, Tools & Supplies, plus any line finance adds) with budget, spent, pending, and remaining.
 
 **SKU field behavior:**
 - **With SKU:** `sku:WCP-0785` → Guaranteed correct, AI skips SKU extraction
