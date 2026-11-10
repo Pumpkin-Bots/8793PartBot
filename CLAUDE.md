@@ -128,7 +128,9 @@ Submitted -> Under Review -> Approved (creates Orders row)
           -> Cancelled (student-initiated)
 ```
 
-🏠 At Mentor means delivered to a mentor's home: the holder lives only in Mentor Notes as `🏠 Delivered to <name> (not in shop yet)` (parsed by `offsiteHolder_`; keep the phrase stable), the order's status reads `🏠 At <name>'s, not in shop yet` and its Received Date stays blank so `/openorders` still lists it. It counts as receivable (`isReceivable_`) and can't be cancelled. `ensureStatusOptions_()` (run from `onOpen` and the `delivered` action) adds new STATUS values to the dropdown without a full setup.
+🏠 At Mentor means delivered to a mentor's home: the holder lives only in Mentor Notes as `🏠 Delivered to <name> (not in shop yet)` (parsed by `offsiteHolder_`; keep the phrase stable), the order's Mentor Notes get `🏠 At <name>'s, not in shop yet` and its Received Date stays blank so `/openorders` still lists it (with `holder`, joined from the request). It counts as receivable (`isReceivable_`) and can't be cancelled. `ensureStatusOptions_()` (run from `onOpen` and the `delivered` action) adds new STATUS values to the dropdown without a full setup.
+
+Orders **Order Status (N)** has a mentor-maintained dropdown (Ordered, Shipped, Received, Delayed, Backordered, Returned) and script writes are checked against it; write it only through `setOrderStatus_()`, which skips values the dropdown doesn't allow. New orders leave it blank until Ordered. (A 🏠 value there broke the first `/delivered` on 2026-11-09, and `🛒 Ordered` had been silently failing for the same reason.)
 
 Denied rows are highlighted red; cancelled rows gray; 🏠 At Mentor rows blue. Received rows are green when added to inventory and yellow when missing from inventory.
 
